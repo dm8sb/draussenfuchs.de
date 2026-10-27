@@ -14,7 +14,7 @@
 namespace ardf {
 namespace timecorr {
 
-// Zeitkorrekturwerte aus NVS laden
+// Zuletzt gemessene Zeitkorrekturwerte aus NVS laden (nur Anzeige)
 bool load(TimeCorrectionData& data);
 
 // Zeitkorrekturwerte in NVS speichern

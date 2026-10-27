@@ -12,8 +12,8 @@
 #include "fox_profile.h"
 #include "morse.h"
 #include "duty_guard.h"
+#include "schedule.h"
 #include "sync_espnow.h"
-#include "time_sync.h"
 #include "time_correction_store.h"
 #include "tx_driver.h"
 #include <Arduino.h>
@@ -41,7 +41,6 @@ void init() {
     menu_shown = false;
 
     const FoxProfile& prof = getProfile(g_config.profile_id);
-    uint32_t timeout_ms = (prof.id == PROFILE_D_ID) ? CLI_TIMEOUT_PROFILD_MS : CLI_TIMEOUT_MS;
 
     Serial.println();
     Serial.println("=========================================");
@@ -54,10 +53,22 @@ void init() {
         Serial.printf(LOG_FOX "Rufzeichen: %s (AFU-Modus)\n", g_config.callsign);
     }
     Serial.println();
-    Serial.printf(LOG_CLI "Enter drücken für Konfigurationsmenü (Auto-Start in %lu s)\n",
-                  (unsigned long)(timeout_ms / 1000));
-    Serial.println(LOG_CLI "Sync-Fenster läuft im Hintergrund...");
+    if (prof.use_espnow) {
+        Serial.println(LOG_CLI "Enter drücken für Konfigurationsmenü");
+        Serial.printf(LOG_CLI "Sync läuft im Hintergrund – Sendebeginn legt der Master fest "
+                      "(spätestens %lu s nach seinem Start)\n",
+                      (unsigned long)(SYNC_WINDOW_MS / 1000));
+    } else {
+        Serial.printf(LOG_CLI "Enter drücken für Konfigurationsmenü (Auto-Start in %lu s)\n",
+                      (unsigned long)(CLI_TIMEOUT_PROFILD_MS / 1000));
+    }
     Serial.println();
+}
+
+// Warten in Eingabeschleifen: Synchronisation weiter bedienen
+static void waitTick() {
+    sync::processSync();
+    delay(1);
 }
 
 void showMenu() {
@@ -96,7 +107,7 @@ static void requireRestart() {
             Serial.println("\nKein Neustart – bitte später Menüpunkt 11 wählen");
             return;
         }
-        yield();
+        waitTick();
     }
     char c = Serial.read();
     while (Serial.available()) Serial.read();
@@ -141,7 +152,7 @@ static void cmdChangeFoxId() {
             Serial.println("\nZeitüberschreitung");
             return;
         }
-        yield();
+        waitTick();
     }
     int val = Serial.parseInt();
     Serial.println(val);
@@ -165,7 +176,7 @@ static void cmdChangeProfile() {
             Serial.println("\nZeitüberschreitung");
             return;
         }
-        yield();
+        waitTick();
     }
     char c = Serial.read();
     // Restliche Zeichen konsumieren
@@ -212,7 +223,7 @@ static void cmdChangeCallsign() {
             return;
         }
         if (!Serial.available()) {
-            yield();
+            waitTick();
             continue;
         }
         char c = Serial.read();
@@ -269,54 +280,78 @@ static void cmdChangeCallsign() {
     requireRestart();
 }
 
+static void printMac(const uint8_t* m) {
+    Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+
+static void printPlan(const schedule::CyclePlan& plan, int8_t own_idx) {
+    Serial.printf("Slotplan:        %u Füchse | Zyklus %lu ms | Slot %lu ms%s\n",
+                  plan.count, (unsigned long)plan.cycle_ms, (unsigned long)plan.slot_ms,
+                  plan.extended ? " (verlängert)" : "");
+    for (uint8_t i = 0; i < plan.count; i++) {
+        Serial.printf("  Slot %u: Fox %u (%s)%s\n", i + 1, plan.fox_ids[i],
+                      morse::getMoCallsign(plan.fox_ids[i]),
+                      (int8_t)i == own_idx ? " <<<" : "");
+    }
+}
+
 static void cmdDutyCycle() {
     Serial.println();
     Serial.println("=== Duty-Cycle-Berechnung ===");
 
     const FoxProfile& prof = getProfile(g_config.profile_id);
-    uint16_t freq_hz = FOX_TONE_HZ[g_config.fox_id - 1];
-    const char* mo = morse::getMoCallsign(g_config.fox_id);
-
-    Serial.printf("Fox-ID:    %u (%s)\n", g_config.fox_id, mo);
-    Serial.printf("Profil:    %c\n", prof.name);
-    Serial.printf("Ton:       %u Hz\n", freq_hz);
-    Serial.printf("WPM:       %u\n", prof.wpm);
-    Serial.printf("Wiederh.:  %u\n", prof.morse_repeats);
-
+    const bool afu = (g_config.callsign[0] != '\0');
     uint32_t tx_total = txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
 
+    Serial.printf("Fox-ID:    %u (%s)\n", g_config.fox_id, morse::getMoCallsign(g_config.fox_id));
+    Serial.printf("Profil:    %c\n", prof.name);
+    Serial.printf("Ton:       %u Hz\n", FOX_TONE_HZ[g_config.fox_id - 1]);
+
     if (prof.is_continuous) {
-        duty::GuardCheck gc = duty::checkDuty(
-            g_config.profile_id, g_config.fox_id, 1, tx_total, false);
+        schedule::FoxTiming own = {g_config.fox_id, tx_total, tx_total};
+        schedule::CyclePlan plan = schedule::computePlan(g_config.profile_id, &own, 1);
         Serial.printf("TX-AN:     %u ms (+ %u ms Vorlauf)\n", prof.tone_on_ms, TX_WARMUP_MS);
-        Serial.printf("TX-AUS:    %lu ms\n",
-                      (unsigned long)(gc.effective_cycle_ms - tx_total));
-        Serial.printf("Zyklus:    %lu ms\n", (unsigned long)gc.effective_cycle_ms);
-        Serial.printf("Duty:      %.2f %% (inkl. 5 %% Sicherheitsaufschlag)\n", gc.duty_percent);
-    } else {
-        // Ton-AN-Zeit (Information) und Sendezeit-Budget (Grundlage des Duty-Guards)
-        uint32_t tone_on = morse::calculateMoToneOnTimeMs(
-            g_config.fox_id, prof.wpm, prof.morse_repeats);
-
-        Serial.printf("Ton-AN:    %lu ms\n", (unsigned long)tone_on);
-        Serial.printf("TX-Budget: %lu ms (Sequenz inkl. Pausen + 20 ms Vorlauf)\n",
-                      (unsigned long)tx_total);
-
-        // Für 1..5 Füchse
+        Serial.printf("TX-AUS:    %lu ms\n", (unsigned long)(plan.cycle_ms - tx_total));
+        Serial.printf("Zyklus:    %lu ms\n", (unsigned long)plan.cycle_ms);
+        Serial.printf("Duty:      %.2f %% (inkl. 5 %% Sicherheitsaufschlag)\n",
+                      duty::calculateDutyPercent(tx_total, plan.cycle_ms));
         Serial.println();
-        Serial.println("Aktive  Zyklus   Slot    Duty    Entscheidung");
-        Serial.println("------  ------   ----    ----    ------------");
+        return;
+    }
 
-        for (uint8_t n = 1; n <= MAX_FOXES; n++) {
-            duty::GuardCheck gc = duty::checkDuty(
-                g_config.profile_id, g_config.fox_id, n, tx_total, false);
-            Serial.printf("  %u     %5lu ms  %5lu ms  %5.1f%%   %s\n",
-                          n,
-                          (unsigned long)gc.effective_cycle_ms,
-                          (unsigned long)gc.effective_slot_ms,
-                          gc.duty_percent,
-                          gc.decision_text);
+    uint32_t tone_on = morse::calculateMoToneOnTimeMs(g_config.fox_id, prof.wpm, prof.morse_repeats);
+    Serial.printf("WPM:       %u\n", prof.wpm);
+    Serial.printf("Wiederh.:  %u\n", prof.morse_repeats);
+    Serial.printf("Ton-AN:    %lu ms\n", (unsigned long)tone_on);
+    Serial.printf("TX-Budget: %lu ms (Sequenz inkl. Pausen + 20 ms Vorlauf)\n",
+                  (unsigned long)tx_total);
+    if (afu) {
+        Serial.printf("TX-Budget im Rufzeichen-Slot: %lu ms\n",
+                      (unsigned long)txBudgetMs(g_config.profile_id, g_config.fox_id, g_config.callsign));
+    }
+
+    // Ungünstigster Fall für n aktive Füchse: eigener Fuchs + die längsten
+    // Kennungen (MO5, MOH, …); im AFU-Modus mit dem eigenen Rufzeichen
+    Serial.println();
+    Serial.println("Slotplan je Anzahl aktiver Füchse (ungünstigster Fall):");
+    Serial.println("Aktive  Zyklus     Slot       Duty    Entscheidung");
+    Serial.println("------  ---------  ---------  ------  ------------");
+    for (uint8_t n = 1; n <= MAX_FOXES; n++) {
+        schedule::FoxTiming foxes[MAX_FOXES];
+        uint8_t count = 0;
+        foxes[count++] = {g_config.fox_id, tx_total,
+                          txBudgetMs(g_config.profile_id, g_config.fox_id,
+                                     afu ? g_config.callsign : nullptr)};
+        for (uint8_t id = MAX_FOXES; id >= 1 && count < n; id--) {
+            if (id == g_config.fox_id) continue;
+            foxes[count++] = {id, txBudgetMs(g_config.profile_id, id, nullptr),
+                              txBudgetMs(g_config.profile_id, id, afu ? g_config.callsign : nullptr)};
         }
+        schedule::CyclePlan plan = schedule::computePlan(g_config.profile_id, foxes, count);
+        Serial.printf("  %u     %6lu ms  %6lu ms  %5.1f%%  %s\n",
+                      n, (unsigned long)plan.cycle_ms, (unsigned long)plan.slot_ms,
+                      duty::calculateDutyPercent(plan.tx_norm_ms, plan.cycle_ms),
+                      plan.extended ? "VERLÄNGERT" : "OK");
     }
     Serial.println();
 }
@@ -325,50 +360,68 @@ static void cmdSyncStatus() {
     Serial.println();
     Serial.println("=== Sync-Status ===");
 
-    const sync::SyncState& ss = sync::getSyncState();
-    const FoxProfile& prof = getProfile(g_config.profile_id);
-
-    if (!prof.use_espnow) {
+    if (!sync::isActive()) {
         Serial.println("ESP-NOW deaktiviert (Profil D: Solo-Modus)");
         Serial.println();
         return;
     }
 
+    const sync::Network& net = sync::network();
+    uint64_t now = esp_timer_get_time();
     uint8_t mac[6];
     sync::getOwnMac(mac);
-    Serial.printf("Eigene MAC:      %02X:%02X:%02X:%02X:%02X:%02X\n",
-                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    Serial.printf("Master:          %s\n", ss.is_master ? "Ja" : "Nein");
-    Serial.printf("Aktive Füchse:   %u\n", ss.active_count);
-    Serial.printf("Eigener Slot:    %u\n", ss.own_slot_index);
-    Serial.printf("Eff. Zyklus:     %lu ms\n", (unsigned long)ss.effective_cycle_ms);
-    Serial.printf("Eff. Slot:       %lu ms\n", (unsigned long)ss.effective_slot_ms);
-    Serial.printf("Config-Hash:     0x%08lX\n", (unsigned long)ss.config_hash);
 
-    if (ss.fox_id_collision) {
-        Serial.println(LOG_ERR "FOX_ID-KOLLISION erkannt!");
-    }
-    if (ss.config_mismatch) {
-        Serial.printf(LOG_ERR "Konfigurations-Abweichung: Fox %u, Profil %c, "
-                      "MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
-                      ss.mismatch_fox_id,
-                      getProfileChar(ss.mismatch_profile_id),
-                      ss.mismatch_mac[0], ss.mismatch_mac[1], ss.mismatch_mac[2],
-                      ss.mismatch_mac[3], ss.mismatch_mac[4], ss.mismatch_mac[5]);
+    Serial.print("Eigene MAC:      ");
+    printMac(mac);
+    Serial.println();
+    Serial.printf("Config-Hash:     0x%08lX\n", (unsigned long)net.own().config_hash);
+
+    if (net.master() == sync::MASTER_NONE) {
+        Serial.println("Master:          (Zuhörphase)");
+    } else if (net.isMaster()) {
+        Serial.println("Master:          dieser Fuchs");
+    } else {
+        const sync::PeerFox& m = net.peer((uint8_t)net.master());
+        Serial.printf("Master:          Fox %u (", m.fox_id);
+        printMac(m.mac);
+        Serial.println(")");
     }
 
-    if (ss.peer_count > 0) {
-        Serial.println("\nErkannte Nachbarn:");
-        for (uint8_t i = 0; i < ss.peer_count; i++) {
-            const sync::PeerFox& p = ss.peers[i];
-            Serial.printf("  Fox %u | MAC %02X:%02X:%02X:%02X:%02X:%02X | %s | %s\n",
-                          p.fox_id,
-                          p.mac[0], p.mac[1], p.mac[2],
-                          p.mac[3], p.mac[4], p.mac[5],
-                          p.compatible ? "kompatibel" : "MISMATCH",
-                          p.active ? "aktiv" : "inaktiv");
+    if (net.hasPlan()) {
+        printPlan(net.plan(), net.ownSlotIndex());
+        uint64_t start = net.planStartLocalUs();
+        Serial.printf("Sendebeginn:     in %.1f s%s\n",
+                      start > now ? (double)(start - now) / 1e6 : 0.0,
+                      net.frozen() ? " (Slotplan fest)" : "");
+        if (net.ownSlotIndex() < 0) {
+            Serial.println(LOG_ERR "Dieser Fuchs ist nicht im Slotplan!");
         }
     } else {
+        Serial.println("Slotplan:        noch nicht bekannt");
+    }
+
+    if (net.collision()) {
+        Serial.println(LOG_ERR "FOX_ID-KOLLISION erkannt!");
+    }
+    if (net.mismatch()) {
+        Serial.printf(LOG_ERR "Konfigurations-Abweichung: Fox %u, Profil %c, MAC ",
+                      net.mismatchFoxId(), getProfileChar(net.mismatchProfileId()));
+        printMac(net.mismatchMac());
+        Serial.println();
+    }
+
+    bool any = false;
+    for (uint8_t i = 0; i < MAX_PEERS; i++) {
+        const sync::PeerFox& p = net.peer(i);
+        if (!p.in_use) continue;
+        if (!any) Serial.println("\nErkannte Nachbarn:");
+        any = true;
+        Serial.printf("  Fox %u | Profil %c | MAC ", p.fox_id, getProfileChar(p.profile_id));
+        printMac(p.mac);
+        Serial.printf(" | %s | %s\n", p.compatible ? "kompatibel" : "MISMATCH",
+                      net.peerActive(i, now) ? "aktiv" : "inaktiv");
+    }
+    if (!any) {
         Serial.println("Keine Nachbarn erkannt (Allein-Boot)");
     }
     Serial.println();
@@ -378,25 +431,39 @@ static void cmdTimeCorrection() {
     Serial.println();
     Serial.println("=== Zeitkorrekturwerte ===");
 
-    const timesync::TimeSyncState& ts = timesync::getState();
-    Serial.printf("Drift:        %d ppm\n", ts.drift_ppm);
-    Serial.printf("Offset:       %lld µs\n", (long long)ts.offset_us);
-    Serial.printf("Qualität:     %u %%\n", ts.quality);
-    Serial.printf("Messungen:    %u\n", ts.meas_count);
-    Serial.printf("Gültig:       %s\n", ts.valid ? "Ja" : "Nein");
+    if (sync::isActive()) {
+        const sync::Network& net = sync::network();
+        const timesync::TimeModel& m = net.timeModel();
+        if (net.isMaster()) {
+            Serial.println("Aktuell:      dieser Fuchs ist Master (Referenzuhr)");
+        } else {
+            Serial.println("Aktuell (gegen den Master):");
+            Serial.printf("  Offset:     %lld µs\n", (long long)m.offsetUs());
+            Serial.printf("  Drift:      %.2f ppm%s\n", m.driftPpm(),
+                          m.hasDrift() ? "" : " (noch nicht geschätzt)");
+            Serial.printf("  Messungen:  %u (davon %u verwendet)\n", m.samples(), m.inliers());
+            Serial.printf("  Qualität:   %u %%\n", m.quality());
+        }
+    }
 
-    if (ts.valid && ts.last_update_us > 0) {
-        uint64_t elapsed = esp_timer_get_time() - ts.last_update_us;
-        Serial.printf("Letzte Akt.:  vor %.1f s\n", (float)elapsed / 1000000.0f);
+    TimeCorrectionData last;
+    if (timecorr::load(last)) {
+        Serial.println("Letzte gespeicherte Messung (nur Anzeige):");
+        Serial.printf("  Drift:      %d ppm\n", last.drift_ppm);
+        Serial.printf("  Offset:     %lld µs\n", (long long)last.offset_us);
+        Serial.printf("  Qualität:   %u %%\n", last.quality);
+        Serial.printf("  Messungen:  %u\n", last.meas_count);
+    } else {
+        Serial.println("Keine gespeicherte Messung");
     }
     Serial.println();
 }
 
 static void cmdClearTimeCorrection() {
     Serial.println(LOG_WARN "Zeitkorrekturwerte werden gelöscht!");
-    timesync::clearNvs();
-    timesync::reset();
-    Serial.println(LOG_CFG "Zeitkorrekturwerte gelöscht und zurückgesetzt");
+    timecorr::clear();
+    sync::resetTimeModel();
+    Serial.println(LOG_CFG "Zeitkorrekturwerte gelöscht, Messung beginnt neu");
 }
 
 static void cmdFactoryReset() {
@@ -409,7 +476,7 @@ static void cmdFactoryReset() {
             Serial.println("\nAbgebrochen");
             return;
         }
-        yield();
+        waitTick();
     }
     char c = Serial.read();
     while (Serial.available()) Serial.read();
@@ -419,6 +486,7 @@ static void cmdFactoryReset() {
         config::eraseAllNvs();
         config::resetToDefaults(g_config);
         config::saveConfig(g_config);
+        sync::resetTimeModel();
         Serial.println(LOG_CFG "Werkseinstellungen geladen und gespeichert");
         requireRestart();
     } else {
@@ -433,35 +501,39 @@ static void cmdStartNormal() {
     }
 
     Serial.println();
-    Serial.println("=== Normalbetrieb wird gestartet ===");
+    if (!sync::isActive()) {
+        // Profil D: sofort starten
+        Serial.println("=== Normalbetrieb wird gestartet ===");
+        Serial.printf(LOG_FOX "Fox-ID: %u | Profil: %c | Ton: %u Hz\n",
+                      g_config.fox_id, getProfileChar(g_config.profile_id),
+                      FOX_TONE_HZ[g_config.fox_id - 1]);
+        cli_active = false;
+        g_start_normal_mode = true;
+        return;
+    }
 
-    const sync::SyncState& ss = sync::getSyncState();
-    const FoxProfile& prof = getProfile(g_config.profile_id);
-
-    Serial.printf(LOG_FOX "Fox-ID: %u | Profil: %c\n",
-                  g_config.fox_id, prof.name);
-    Serial.printf(LOG_FOX "Aktive Füchse: %u\n", ss.active_count);
-    Serial.printf(LOG_FOX "Eigener Slot:  %u von %u\n",
-                  ss.own_slot_index + 1, ss.active_count);
-    Serial.printf(LOG_FOX "Eff. Zyklus:   %lu ms\n", (unsigned long)ss.effective_cycle_ms);
-    Serial.printf(LOG_FOX "Eff. Slot:     %lu ms\n", (unsigned long)ss.effective_slot_ms);
-    Serial.printf(LOG_FOX "Ton:           %u Hz\n", FOX_TONE_HZ[g_config.fox_id - 1]);
-
+    // ARDF: Der Sendebeginn gilt für den ganzen Verbund
+    const sync::Network& net = sync::network();
+    if (!net.hasPlan()) {
+        Serial.println(LOG_WARN "Sync läuft noch – Slotplan noch nicht bekannt, bitte kurz warten");
+        return;
+    }
+    if (sync::requestStart()) {
+        Serial.println(LOG_FOX "Master: Sendebeginn für alle Füchse vorgezogen");
+    } else if (!net.isMaster()) {
+        Serial.println(LOG_FOX "Den Sendebeginn legt der Master fest");
+    }
+    uint64_t now = esp_timer_get_time();
+    uint64_t start = net.planStartLocalUs();
+    Serial.printf(LOG_FOX "Sendebeginn in %.1f s – CLI wird beendet\n",
+                  start > now ? (double)(start - now) / 1e6 : 0.0);
+    printPlan(net.plan(), net.ownSlotIndex());
     if (g_config.callsign[0] != '\0') {
-        Serial.printf(LOG_FOX "Rufzeichen: %s (AFU-Modus, alle %u Slots)\n",
+        Serial.printf(LOG_FOX "Rufzeichen: %s (AFU-Modus, alle %u Aussendungen)\n",
                       g_config.callsign, CALLSIGN_SLOT_INTERVAL);
     }
-
     Serial.println();
-    Serial.println(LOG_FOX "Slotplan:");
-    for (uint8_t i = 0; i < ss.active_count; i++) {
-        const char* marker = (i == ss.own_slot_index) ? " <<<" : "";
-        Serial.printf("  Slot %u: Fox %u%s\n", i + 1, ss.active_fox_ids[i], marker);
-    }
-    Serial.println();
-
     cli_active = false;
-    g_start_normal_mode = true;
 }
 
 static void cmdReboot() {
@@ -474,7 +546,9 @@ static void cmdHelp() {
     Serial.println();
     Serial.println("=== Hilfe ===");
     Serial.println("Dieses Menü ist nur während der Startphase aktiv.");
-    Serial.println("Nach Inaktivität startet der Normalbetrieb automatisch.");
+    Serial.println("Profile A–C: Den Sendebeginn legt der Master für alle Füchse fest;");
+    Serial.println("             Menüpunkt 10 am Master zieht ihn vor.");
+    Serial.println("Profil D:    Nach Inaktivität startet der Normalbetrieb automatisch.");
     Serial.println();
     Serial.println("Profile:");
     Serial.println("  A – ISM-Standard: 60s Zyklus, 18 WPM, MO-Kennung 2×");
@@ -585,13 +659,11 @@ bool isActive() {
 }
 
 bool isTimedOut() {
-    if (!cli_active) return false;
+    // Nur Profil D – in den Profilen A–C bestimmt der Slotplan den Start
+    if (!cli_active || sync::isActive()) return false;
 
-    const FoxProfile& prof = getProfile(g_config.profile_id);
-    uint32_t timeout_ms = (prof.id == PROFILE_D_ID) ? CLI_TIMEOUT_PROFILD_MS : CLI_TIMEOUT_MS;
     uint64_t elapsed = esp_timer_get_time() - last_activity_us;
-
-    return (elapsed > (uint64_t)timeout_ms * 1000ULL);
+    return (elapsed > (uint64_t)CLI_TIMEOUT_PROFILD_MS * 1000ULL);
 }
 
 void resetIdleTimer() {

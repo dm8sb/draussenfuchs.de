@@ -39,11 +39,16 @@ constexpr uint8_t  CALLSIGN_MAX_LEN         = 12;
 constexpr uint8_t  SYNC_PROTOCOL_VERSION    = 3;
 constexpr uint16_t BEACON_INTERVAL_MS       = 500;  // ± 50 ms Jitter
 constexpr uint8_t  BEACON_JITTER_MS         = 50;
-constexpr uint32_t SYNC_WINDOW_NOMINAL_MS   = 120000;  // 120 s (Profile A–C)
-constexpr uint32_t SYNC_WINDOW_PROFILD_MS   = 30000;   // 30 s (Profil D)
-constexpr uint32_t SYNC_WINDOW_MAX_MS       = 180000;  // 180 s maximal
+constexpr uint32_t SYNC_WINDOW_MS           = 120000;  // Sendebeginn 120 s nach Sync-Start des Masters
+constexpr uint32_t SYNC_LISTEN_MS           = 1500;    // Erst zuhören, dann ggf. Master werden
+constexpr uint32_t PEER_TIMEOUT_MS          = 3000;    // Peer ohne Beacon gilt als inaktiv
+constexpr uint32_t PLAN_FREEZE_MS           = 10000;   // Slotplan 10 s vor Sendebeginn fest
+constexpr uint32_t SYNC_FINISH_LEAD_MS      = 1000;    // Sync endet 1 s vor Sendebeginn
+constexpr uint32_t START_LEAD_MS            = 5000;    // Menüpunkt 10 (Master): Start in 5 s
+constexpr uint32_t SLOT_GUARD_MS            = 250;     // Schutzabstand bis zum nächsten Slot
 constexpr uint8_t  ESPNOW_CHANNEL           = 1;
 constexpr uint8_t  MAX_FOXES                = 5;
+constexpr uint8_t  MAX_PEERS                = 8;       // auch fremde/inkompatible Geräte
 
 // ---- Duty-Guard ----
 constexpr float    DUTY_LIMIT_ISM           = 0.095f;  // 9,5 % Sicherheitsmarge
@@ -51,19 +56,15 @@ constexpr float    DUTY_LIMIT_AFU_CALLSIGN  = 0.50f;   // 50 % im AFU-Callsign-S
 constexpr float    DUTY_SAFETY_FACTOR       = 1.05f;   // 5 % Sicherheitsaufschlag auf TX-Zeit
 
 // ---- CLI ----
-constexpr uint32_t CLI_TIMEOUT_MS           = 120000;  // 120 s Auto-Start (Profile A–C)
 constexpr uint32_t CLI_TIMEOUT_PROFILD_MS   = 30000;   // 30 s Auto-Start (Profil D)
 
 // ---- Zeitkorrektur ----
-constexpr int16_t  DRIFT_PPM_MAX_VALID      = 500;     // |ppm| < 500 für NVS-Nutzung
-constexpr uint8_t  DRIFT_QUALITY_MIN        = 60;      // Mindestqualität für NVS-Nutzung
+// Quarz-Toleranz zweier Boards: zusammen deutlich unter 100 ppm; größere
+// Steigungen sind Messfehler und werden verworfen.
+constexpr int16_t  DRIFT_PPM_MAX_VALID      = 100;
 constexpr uint8_t  DRIFT_MIN_SAMPLES        = 30;      // Min. Messpunkte für Regression
-
-// ---- Vorlaufberechnung (µs) ----
-constexpr uint32_t VORLAUF_BASE_US          = 80000;   // 80 ms Basis
-constexpr uint32_t VORLAUF_EXTRA_US         = 20000;   // 20 ms Zusatz
-constexpr uint32_t VORLAUF_MIN_US           = 100000;  // 100 ms Minimum
-constexpr uint32_t VORLAUF_MAX_US           = 350000;  // 350 ms Maximum
+constexpr uint16_t TIME_MAX_SAMPLES         = 256;     // Ringpuffer: ganzes Sync-Fenster (2 Beacons/s)
+constexpr uint32_t TIME_OUTLIER_MIN_US      = 500;     // Mindest-Ausreißergrenze
 
 // ---- TX-Modul ----
 constexpr uint16_t TX_WARMUP_MS             = 20;      // 20 ms Oszillator-Einschwingzeit
@@ -88,7 +89,7 @@ constexpr uint16_t FOX_TONE_HZ[MAX_FOXES]  = {700, 800, 900, 1000, 1200};
 constexpr const char* NVS_NAMESPACE_CFG     = "ardf_fox";
 constexpr const char* NVS_KEY_CFG           = "cfg_v2";
 constexpr const char* NVS_NAMESPACE_TIME    = "timecorr";
-constexpr const char* NVS_KEY_TIME          = "tc_v1";
+constexpr const char* NVS_KEY_TIME          = "tc_v2";   // letzte Messung (nur Anzeige)
 
 // ---- Config-Struct (NVS-Persistenz) ----
 struct __attribute__((packed)) ConfigV2 {
@@ -100,6 +101,8 @@ struct __attribute__((packed)) ConfigV2 {
 };
 
 // ---- Zeitkorrektur-Struct (NVS-Persistenz) ----
+// Letzte Messung gegen den Master. Nur zur Anzeige: Die Drift gilt relativ zum
+// jeweiligen Master und wird beim nächsten Einsatz neu gemessen.
 struct __attribute__((packed)) TimeCorrectionData {
     int16_t  drift_ppm;
     int64_t  offset_us;
@@ -108,29 +111,31 @@ struct __attribute__((packed)) TimeCorrectionData {
     uint32_t crc32;
 };
 
-// ---- SyncBeacon-Struct ----
+// ---- SyncBeacon-Struct (Protokoll v3) ----
+// Absender-MAC kommt aus dem ESP-NOW-Empfang, nicht aus dem Payload.
 struct __attribute__((packed)) SyncBeacon {
-    uint8_t  protocol_ver;        // = 2
+    uint8_t  protocol_ver;        // = SYNC_PROTOCOL_VERSION
     uint8_t  profile_id;
     uint8_t  fox_id;
-    uint8_t  flags;               // Bit-Maske
-    uint8_t  mac[6];
+    uint8_t  flags;               // Bit-Maske FLAG_*
     uint32_t boot_id;             // Zufällige ID pro Boot
-    uint64_t uptime_us;
-    uint64_t cycle_start_us;
-    uint32_t config_hash;
-    int16_t  drift_ppm_est;
-    uint8_t  sync_quality;
-    uint8_t  active_count;
-    uint8_t  active_fox_ids[5];
-    uint16_t slot_ms;
-    uint16_t cycle_ms;
+    uint64_t uptime_us;           // Sendezeitpunkt in der Uhr des Absenders
+    uint32_t config_hash;         // verbundweite Parameter (ohne Fox-ID)
+    uint32_t tx_norm_ms;          // Sendezeit-Budget normaler Slot
+    uint32_t tx_max_ms;           // längste Aussendung (Rufzeichen-Slot)
+    uint64_t plan_start_us;       // Sendebeginn in der Uhr des Absenders (FLAG_HAS_START)
+    // Slotplan – nur gültig mit FLAG_MASTER
+    uint32_t plan_cycle_ms;
+    uint32_t plan_slot_ms;
+    uint8_t  plan_count;
+    uint8_t  plan_fox_ids[MAX_FOXES];
 };
 
 // ---- SyncBeacon Flags ----
 constexpr uint8_t FLAG_AFU_MODE       = (1 << 0);  // Bit 0: AFU-Modus aktiv
-constexpr uint8_t FLAG_DUTY_GUARD     = (1 << 1);  // Bit 1: Duty-Guard aktiv
-constexpr uint8_t FLAG_MASTER         = (1 << 2);  // Bit 2: Master-Rolle
+constexpr uint8_t FLAG_MASTER         = (1 << 1);  // Bit 1: Master, Slotplan gültig
+constexpr uint8_t FLAG_PLAN_FROZEN    = (1 << 2);  // Bit 2: Slotplan eingefroren
+constexpr uint8_t FLAG_HAS_START      = (1 << 3);  // Bit 3: plan_start_us gültig
 
 // ---- Config-Hash Eingabe-Struct ----
 // Nur verbundweite Parameter – keine Fox-ID, sonst wären Füchse mit

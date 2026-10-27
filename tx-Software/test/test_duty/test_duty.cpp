@@ -60,54 +60,48 @@ void test_min_cycle_edge_1ms(void) {
     TEST_ASSERT_TRUE(duty::calculateDutyPercent(1, min_cycle) <= 9.5f);
 }
 
-// ---- Duty-Guard ----
+// ---- AFU-Grenze ----
 
-// Alle ARDF-Profile, alle Fox-IDs, 1..5 aktive Füchse: Duty ≤ 9,5 %, nie blockiert
-void test_all_profiles_all_foxes_ism(void) {
-    for (uint8_t p = PROFILE_A_ID; p <= PROFILE_C_ID; p++) {
-        for (uint8_t fox = 1; fox <= MAX_FOXES; fox++) {
-            uint32_t tx = txBudgetMs(p, fox, nullptr);
-            for (uint8_t n = 1; n <= MAX_FOXES; n++) {
-                duty::GuardCheck gc = duty::checkDuty(p, fox, n, tx, false);
-                TEST_ASSERT_TRUE_MESSAGE(gc.duty_percent <= 9.5f, "Duty > 9,5 %");
-                TEST_ASSERT_TRUE(gc.result != duty::GuardResult::BLOCKIERT);
-                TEST_ASSERT_TRUE(gc.effective_cycle_ms >= getProfile(p).slot_ms * n);
-            }
-        }
-    }
+void test_afu_callsign_limit(void) {
+    // 5000 × 1,05 / 0,50 = 10500 ms
+    TEST_ASSERT_EQUAL_UINT32(10500, duty::calculateMinCycleMs(5000, true));
+    TEST_ASSERT_TRUE(duty::calculateDutyPercent(5000, 10500) <= 50.0f);
 }
 
-// 5 Füchse: nominaler Profilzyklus reicht in allen Profilen (kein Verlängern)
-void test_five_foxes_nominal_cycle(void) {
-    for (uint8_t p = PROFILE_A_ID; p <= PROFILE_C_ID; p++) {
-        uint32_t tx = txBudgetMs(p, 5, nullptr);  // MO5 = längste Kennung
-        duty::GuardCheck gc = duty::checkDuty(p, 5, 5, tx, false);
-        TEST_ASSERT_EQUAL_UINT32(getProfile(p).cycle_ms, gc.effective_cycle_ms);
-        TEST_ASSERT_TRUE(gc.result == duty::GuardResult::OK);
-    }
+// ---- Laufzeit-Guard ----
+
+// Erste Aussendung ist immer erlaubt
+void test_guard_first_tx_allowed(void) {
+    duty::Guard g;
+    TEST_ASSERT_TRUE(g.allows(0));
+    TEST_ASSERT_TRUE(g.allows(123456789ULL));
 }
 
-// 1 Fuchs in Profil C: Zyklus wird auf ISM-sicheren Wert verlängert
-void test_one_fox_extended(void) {
+// Nach einer Aussendung: Freigabe erst nach dem ISM-Mindestabstand
+void test_guard_blocks_too_early(void) {
+    duty::Guard g;
+    uint64_t t0 = 1000000ULL;
+    g.record(t0, 1000, false);                          // Mindestabstand 11053 ms
+    TEST_ASSERT_FALSE(g.allows(t0 + 11052000ULL));
+    TEST_ASSERT_TRUE(g.allows(t0 + 11053000ULL));
+    TEST_ASSERT_TRUE(g.nextAllowedUs() == t0 + 11053000ULL);
+}
+
+// Profilwechsel-Szenario (Befund 2.1): Profil C mit dem 2,4-s-Zyklus von Profil D
+// muss blockiert werden
+void test_guard_blocks_profile_d_cycle_with_morse(void) {
+    duty::Guard g;
     uint32_t tx = txBudgetMs(PROFILE_C_ID, 1, nullptr);
-    duty::GuardCheck gc = duty::checkDuty(PROFILE_C_ID, 1, 1, tx, false);
-    TEST_ASSERT_EQUAL_UINT32(14037, gc.effective_cycle_ms);
-    TEST_ASSERT_TRUE(gc.result == duty::GuardResult::VERLAENGERT);
+    g.record(0, tx, false);
+    TEST_ASSERT_FALSE(g.allows(2400000ULL));
 }
 
-// Profil D: Mindestzyklus nach Budget-Definition (220 ms × 1,05 / 0,095 = 2432 ms)
-void test_profil_d_cycle(void) {
-    uint32_t tx = txBudgetMs(PROFILE_D_ID, 1, nullptr);
-    duty::GuardCheck gc = duty::checkDuty(PROFILE_D_ID, 1, 1, tx, false);
-    TEST_ASSERT_EQUAL_UINT32(2432, gc.effective_cycle_ms);
-    TEST_ASSERT_TRUE(gc.duty_percent <= 9.5f);
-}
-
-// AFU-Rufzeichen-Slot: 50-%-Grenze
-void test_afu_callsign_slot(void) {
-    duty::GuardCheck gc = duty::checkDuty(PROFILE_C_ID, 1, 1, 5000, true);
-    TEST_ASSERT_TRUE(gc.duty_percent <= 50.0f);
-    TEST_ASSERT_TRUE(gc.effective_cycle_ms >= 10500);
+// AFU-Rufzeichen-Slot: Abstand nach der 50-%-Grenze
+void test_guard_afu_slot(void) {
+    duty::Guard g;
+    g.record(0, 5000, true);                            // 10500 ms
+    TEST_ASSERT_FALSE(g.allows(10499000ULL));
+    TEST_ASSERT_TRUE(g.allows(10500000ULL));
 }
 
 // ---- Hauptfunktion ----
@@ -125,11 +119,11 @@ int main(int, char**) {
     RUN_TEST(test_budget_with_callsign);
     RUN_TEST(test_safety_factor_applied);
     RUN_TEST(test_min_cycle_edge_1ms);
-    RUN_TEST(test_all_profiles_all_foxes_ism);
-    RUN_TEST(test_five_foxes_nominal_cycle);
-    RUN_TEST(test_one_fox_extended);
-    RUN_TEST(test_profil_d_cycle);
-    RUN_TEST(test_afu_callsign_slot);
+    RUN_TEST(test_afu_callsign_limit);
+    RUN_TEST(test_guard_first_tx_allowed);
+    RUN_TEST(test_guard_blocks_too_early);
+    RUN_TEST(test_guard_blocks_profile_d_cycle_with_morse);
+    RUN_TEST(test_guard_afu_slot);
 
     return UNITY_END();
 }

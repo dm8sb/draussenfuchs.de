@@ -36,14 +36,6 @@ bool load(TimeCorrectionData& data) {
         return false;
     }
 
-    // Plausibilitätsprüfung
-    if (abs(data.drift_ppm) >= DRIFT_PPM_MAX_VALID || data.quality < DRIFT_QUALITY_MIN) {
-        Serial.println(LOG_WARN "Zeitkorrekturwerte außerhalb gültiger Grenzen");
-        return false;
-    }
-
-    Serial.printf(LOG_CFG "Zeitkorrektur aus NVS geladen: Drift=%d ppm, Qualität=%u\n",
-                  data.drift_ppm, data.quality);
     return true;
 }
 

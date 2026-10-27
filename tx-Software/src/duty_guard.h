@@ -4,6 +4,7 @@
 
 // ============================================================================
 // duty_guard.h – Duty-Cycle-Überwachung und -Schutz
+// (hardwareunabhängig, nativ testbar)
 // ============================================================================
 
 #ifndef ARDF_DUTY_GUARD_H
@@ -14,39 +15,29 @@
 namespace ardf {
 namespace duty {
 
-// Ergebnis der Duty-Guard-Prüfung
-enum class GuardResult : uint8_t {
-    OK = 0,           // Senden erlaubt
-    VERLAENGERT,      // Zyklus wurde verlängert, Senden erlaubt
-    BLOCKIERT         // Senden blockiert
+// Duty-Grenze: 9,5 % (ISM), 50 % im AFU-Rufzeichen-Slot
+float limitFor(bool afu_callsign_slot);
+
+// Minimaler Abstand zwischen zwei Sendebeginnen für eine Aussendung von tx_ms
+// Formel: ceil(tx_ms × 1,05 / Grenze)
+uint32_t calculateMinCycleMs(uint32_t tx_ms, bool afu_callsign_slot = false);
+
+// Duty-Cycle in Prozent (inkl. 5 % Sicherheitsaufschlag)
+float calculateDutyPercent(uint32_t tx_ms, uint32_t cycle_ms);
+
+// Laufzeit-Guard: gibt eine Aussendung nur frei, wenn seit dem Beginn der
+// vorherigen Aussendung deren Mindestabstand vergangen ist. Letzte Instanz
+// unabhängig von der Zeitplanung.
+class Guard {
+public:
+    bool allows(uint64_t start_us) const;
+    void record(uint64_t start_us, uint32_t tx_ms, bool afu_callsign_slot);
+    uint64_t nextAllowedUs() const { return next_allowed_us_; }
+
+private:
+    bool     has_last_ = false;
+    uint64_t next_allowed_us_ = 0;
 };
-
-// Duty-Guard-Ergebnis mit Details
-struct GuardCheck {
-    GuardResult result;
-    uint32_t    effective_cycle_ms;
-    uint32_t    effective_slot_ms;
-    uint32_t    tx_on_ms;          // Geschätzte TX-ON-Zeit
-    float       duty_percent;
-    const char* decision_text;     // "OK", "VERLÄNGERT" oder "BLOCKIERT"
-};
-
-// Prüfe ob Senden im aktuellen Slot erlaubt ist
-// afu_callsign_slot: true wenn dies der 10. Slot im AFU-Modus ist
-GuardCheck checkDuty(uint8_t profile_id, uint8_t fox_id,
-                     uint8_t active_count, uint32_t tx_on_ms,
-                     bool afu_callsign_slot);
-
-// Berechne den minimalen Zyklus in ms für gegebene TX-Zeit
-// Formel: ceil(tx_on_ms * 1.05 / 0.095)
-uint32_t calculateMinCycleMs(uint32_t tx_on_ms);
-
-// Berechne den effektiven Zyklus basierend auf aktiven Füchsen
-uint32_t calculateEffectiveCycleMs(uint8_t profile_id, uint8_t active_count,
-                                    uint32_t tx_on_ms);
-
-// Berechne den Duty-Cycle in Prozent
-float calculateDutyPercent(uint32_t tx_on_ms, uint32_t cycle_ms);
 
 } // namespace duty
 } // namespace ardf

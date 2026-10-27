@@ -5,6 +5,13 @@
 // ============================================================================
 // main.cpp – Hauptprogramm ARDF-Fuchsjagd-Sender ESP32-C3
 // ============================================================================
+//
+// Profile A/B/C (ARDF-Verbund): Startphase mit CLI und ESP-NOW-Sync bis zum
+// vereinbarten Sendebeginn. Danach bleibt der Fuchs wach (WiFi aus, 80 MHz),
+// damit alle Sendezeitpunkte über den Quarz laufen – der Deep-Sleep-Timer
+// (interner RC-Oszillator) ist für ein gemeinsames Slotraster zu ungenau.
+//
+// Profil D (Solo): Aussendung, dann Deep-Sleep bis zur nächsten Aussendung.
 
 #include <Arduino.h>
 #include <esp_arduino_version.h>
@@ -14,8 +21,8 @@
 #include "morse.h"
 #include "tx_driver.h"
 #include "duty_guard.h"
+#include "schedule.h"
 #include "sync_espnow.h"
-#include "time_sync.h"
 #include "cli.h"
 #include <esp_sleep.h>
 #include <driver/gpio.h>
@@ -24,34 +31,22 @@
 ConfigV2 g_config;
 bool g_start_normal_mode = false;
 
-// ---- RTC-persistente Daten (überleben Deep-Sleep) ----
-RTC_DATA_ATTR uint8_t  tx_counter = 0;          // Callsign-Slot-Zähler (nur AFU)
-RTC_DATA_ATTR bool     rtc_initialized = false;  // Erster Boot?
-RTC_DATA_ATTR uint64_t rtc_cycle_start_us = 0;   // Zyklusstart-Zeitpunkt
-RTC_DATA_ATTR uint8_t  rtc_active_count = 1;     // Aktive Füchse
-RTC_DATA_ATTR uint8_t  rtc_own_slot_idx = 0;     // Eigener Slot-Index
-RTC_DATA_ATTR uint32_t rtc_effective_cycle_ms = 0;
-RTC_DATA_ATTR uint32_t rtc_effective_slot_ms = 0;
-RTC_DATA_ATTR int16_t  rtc_drift_ppm = 0;
-RTC_DATA_ATTR uint64_t rtc_last_sync_us = 0;     // Letzter Sync-Zeitpunkt
-RTC_DATA_ATTR uint8_t  rtc_error_state = 0;      // 0 = kein Fehler
-RTC_DATA_ATTR uint64_t rtc_error_start_us = 0;   // Fehler-Startzeit
-
 // ---- Fehlerzustände ----
 enum ErrorState : uint8_t {
-    ERR_NONE           = 0,
-    ERR_FOX_COLLISION  = 1,
+    ERR_NONE            = 0,
+    ERR_FOX_COLLISION   = 1,
     ERR_CONFIG_MISMATCH = 2,
-    ERR_INVALID_CONFIG = 3,
-    ERR_DUTY_BLOCKED   = 4
+    ERR_INVALID_CONFIG  = 3,
+    ERR_NOT_IN_PLAN     = 4,
+    ERR_SYNC_INIT       = 5
 };
 
 // ---- Vorwärtsdeklarationen ----
 static void runStartupPhase();
-static void runNormalMode();
+static void runArdfMode();
+static void runSoloMode();
 static void enterDeepSleep(uint64_t sleep_us);
 static void handleError(ErrorState error);
-static uint64_t calculateNextSlotUs(uint32_t cycle_ms);
 
 // ---- Duty-Log im vorgegebenen Format ----
 static void logDutyStatus(uint8_t profile_id, uint8_t active_count,
@@ -72,39 +67,29 @@ void setup() {
     // Seriell starten
     Serial.begin(SERIAL_BAUD);
 
-    // Bei erstem Boot (nicht aus Deep-Sleep) kurz warten
-    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
-    bool from_deep_sleep = (wakeup == ESP_SLEEP_WAKEUP_TIMER);
-
-    if (!from_deep_sleep) {
-        // Erster Boot oder Reset
-        delay(500); // USB-CDC Stabilisierung
-        Serial.println();
-        Serial.printf(LOG_FOX "ARDF-Fuchsjagd-Sender v%s – Boot\n", ARDF_VERSION);
-
-        // Konfiguration laden
+    // Aufwachen aus dem Deep-Sleep gibt es nur in Profil D
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         ardf::config::loadConfig(g_config);
-
-        // Zeitkorrektur initialisieren
-        ardf::timesync::init();
-
-        // RTC-Variablen zurücksetzen
-        tx_counter = 0;
-        rtc_initialized = false;
-        rtc_error_state = ERR_NONE;
-
-        // Startphase ausführen (CLI + Sync)
-        runStartupPhase();
-    } else {
-        // Wakeup aus Deep-Sleep → Normalbetrieb
-        // Konfiguration laden (schnell, ohne viel Log)
-        ardf::config::loadConfig(g_config);
-        runNormalMode();
+        if (ardf::getProfile(g_config.profile_id).is_continuous) {
+            runSoloMode();
+            return;
+        }
+        // Profil inzwischen geändert: regulär starten
     }
+
+    // Erster Boot oder Reset
+    delay(500); // USB-CDC Stabilisierung
+    Serial.println();
+    Serial.printf(LOG_FOX "ARDF-Fuchsjagd-Sender v%s – Boot\n", ARDF_VERSION);
+
+    ardf::config::loadConfig(g_config);
+
+    // Startphase ausführen (CLI + Sync)
+    runStartupPhase();
 }
 
 void loop() {
-    // Wird nie erreicht (Deep-Sleep nach jedem TX)
+    // Wird nie erreicht (Sendebetrieb läuft in runArdfMode/runSoloMode)
 }
 
 // ============================================================================
@@ -113,44 +98,35 @@ void loop() {
 static void runStartupPhase() {
     const ardf::FoxProfile& prof = ardf::getProfile(g_config.profile_id);
 
-    // ESP-NOW-Sync starten (außer Profil D)
-    if (prof.use_espnow) {
-        ardf::sync::initSync(g_config.profile_id, g_config.fox_id, g_config.callsign);
-    } else {
-        // Profil D: Sync sofort als abgeschlossen markieren
-        ardf::sync::initSync(g_config.profile_id, g_config.fox_id, g_config.callsign);
-    }
-
-    // CLI initialisieren
+    bool sync_ok = ardf::sync::initSync(g_config);
     ardf::cli::init();
+    if (!sync_ok) {
+        handleError(ERR_SYNC_INIT);
+        return;
+    }
 
     // Hauptschleife der Startphase
     while (true) {
-        // CLI verarbeiten
         ardf::cli::process();
 
-        // Normalbetrieb angefordert?
-        if (g_start_normal_mode) {
-            break;
-        }
-
-        // CLI-Timeout prüfen
-        if (ardf::cli::isTimedOut()) {
-            Serial.println();
-            if (ardf::cli::restartRequired()) {
-                // Geänderte Konfiguration nie mit veraltetem Sync-Zustand senden
-                Serial.println(LOG_CLI "Inaktivitäts-Timeout – Konfiguration geändert, Neustart");
-                delay(500);
-                esp_restart();
-            }
-            Serial.println(LOG_CLI "Inaktivitäts-Timeout – Normalbetrieb wird gestartet");
-            g_start_normal_mode = true;
-            break;
-        }
-
-        // Sync verarbeiten (non-blocking, Profile A–C)
-        if (prof.use_espnow && !ardf::sync::isSyncComplete()) {
+        if (prof.use_espnow) {
+            // ARDF: Der Sendebeginn ergibt sich aus dem Slotplan des Masters
             ardf::sync::processSync();
+            if (ardf::sync::isSyncComplete()) {
+                if (ardf::cli::isActive()) {
+                    Serial.println();
+                    Serial.println(LOG_CLI "Sendebeginn – CLI wird beendet");
+                }
+                break;
+            }
+        } else {
+            // Profil D: Start per Menüpunkt 10 oder Inaktivitäts-Timeout
+            if (g_start_normal_mode) break;
+            if (ardf::cli::isTimedOut()) {
+                Serial.println();
+                Serial.println(LOG_CLI "Inaktivitäts-Timeout – Normalbetrieb wird gestartet");
+                break;
+            }
         }
 
         // LED-Herzschlag (Boot/Sync)
@@ -166,199 +142,173 @@ static void runStartupPhase() {
             }
         }
 
-        yield();
         delay(10);
     }
 
-    // Sync beenden
-    const ardf::sync::SyncState& ss = ardf::sync::getSyncState();
-
-    // Fehler prüfen
-    if (ss.fox_id_collision) {
-        handleError(ERR_FOX_COLLISION);
-        return;
-    }
-    if (ss.config_mismatch) {
-        handleError(ERR_CONFIG_MISMATCH);
-        return;
+    // Geänderte Konfiguration nie mit veraltetem Sync-Zustand senden
+    if (ardf::cli::restartRequired()) {
+        Serial.println(LOG_CLI "Konfiguration geändert – Neustart");
+        delay(500);
+        esp_restart();
     }
 
-    // Konfiguration validieren
     if (!ardf::config::isValidConfig(g_config)) {
         handleError(ERR_INVALID_CONFIG);
         return;
     }
 
-    // Sync-Ergebnisse in RTC übernehmen
-    rtc_initialized = true;
-    rtc_active_count = ss.active_count;
-    rtc_own_slot_idx = ss.own_slot_index;
-    rtc_effective_cycle_ms = ss.effective_cycle_ms;
-    rtc_effective_slot_ms = ss.effective_slot_ms;
-    rtc_cycle_start_us = ss.cycle_start_us;
+    if (!prof.use_espnow) {
+        runSoloMode();
+        return;
+    }
 
-    const ardf::timesync::TimeSyncState& ts = ardf::timesync::getState();
-    rtc_drift_ppm = ts.drift_ppm;
-    rtc_last_sync_us = ts.last_update_us;
+    // Verbund prüfen
+    const ardf::sync::Network& net = ardf::sync::network();
+    if (net.collision()) {
+        handleError(ERR_FOX_COLLISION);
+        return;
+    }
+    if (net.mismatch()) {
+        handleError(ERR_CONFIG_MISMATCH);
+        return;
+    }
+    if (net.ownSlotIndex() < 0) {
+        handleError(ERR_NOT_IN_PLAN);
+        return;
+    }
 
-    // Sync-Ressourcen freigeben
-    ardf::sync::deinitSync();
-
-    // Duty-Guard prüfen und loggen
-    uint32_t tx_on_ms = ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
-    ardf::duty::GuardCheck gc = ardf::duty::checkDuty(
-        g_config.profile_id, g_config.fox_id,
-        rtc_active_count, tx_on_ms, false);
-    logDutyStatus(
-        g_config.profile_id, rtc_active_count,
-        gc.effective_slot_ms, gc.effective_cycle_ms,
-        tx_on_ms, gc.duty_percent, gc.decision_text);
-
-    // Ersten TX starten
-    runNormalMode();
+    ardf::sync::finishSync();
+    runArdfMode();
 }
 
 // ============================================================================
-// Normalbetrieb: Senden + Deep-Sleep
+// Bis zum lokalen Zeitpunkt target_us warten (Quarz-genau)
 // ============================================================================
-static void runNormalMode() {
+static void waitUntil(uint64_t target_us) {
+    while (true) {
+        uint64_t now = esp_timer_get_time();
+        if (now >= target_us) return;
+        uint64_t remaining_us = target_us - now;
+        if (remaining_us > 3000) {
+            uint64_t ms = (remaining_us - 2000) / 1000;
+            delay(ms > 100 ? 100 : (uint32_t)ms);
+        }
+        // letzte 2–3 ms aktiv warten
+    }
+}
+
+// ============================================================================
+// ARDF-Betrieb (Profile A/B/C): Senden im gemeinsamen Slotraster
+// ============================================================================
+static void runArdfMode() {
+    const ardf::sync::Network& net = ardf::sync::network();
+    const ardf::schedule::CyclePlan& plan = net.plan();
+    const ardf::timesync::TimeModel& model = net.timeModel();
+    const uint64_t start_ref = net.planStartRefUs();
+    const uint8_t slot_idx = (uint8_t)net.ownSlotIndex();
+
+    const ardf::FoxProfile& prof = ardf::getProfile(g_config.profile_id);
+    const uint16_t freq_hz = FOX_TONE_HZ[g_config.fox_id - 1];
+    const bool is_afu = (g_config.callsign[0] != '\0');
+    const uint32_t tx_norm_ms = ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
+    const uint32_t tx_call_ms = is_afu
+        ? ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, g_config.callsign)
+        : tx_norm_ms;
+
+    Serial.printf(LOG_FOX "Normalbetrieb: %s, Slot %u von %u, Zyklus %lu ms, Slot %lu ms\n",
+                  net.isMaster() ? "Master" : "Slave", slot_idx + 1, plan.count,
+                  (unsigned long)plan.cycle_ms, (unsigned long)plan.slot_ms);
+    if (!net.isMaster()) {
+        Serial.printf(LOG_SYNC "Zeitmodell: Offset %lld µs, Drift %.2f ppm (%s), %u Messwerte\n",
+                      (long long)model.offsetUs(), model.driftPpm(),
+                      model.hasDrift() ? "geschätzt" : "nicht geschätzt", model.samples());
+    }
+    logDutyStatus(g_config.profile_id, plan.count, plan.slot_ms, plan.cycle_ms, tx_norm_ms,
+                  ardf::duty::calculateDutyPercent(tx_norm_ms, plan.cycle_ms),
+                  plan.extended ? "VERLÄNGERT" : "OK");
+    if (is_afu) {
+        logDutyStatus(g_config.profile_id, plan.count, plan.slot_ms, plan.cycle_ms, tx_call_ms,
+                      ardf::duty::calculateDutyPercent(tx_call_ms, plan.cycle_ms),
+                      "AFU-Rufzeichen-Slot");
+    }
+
+    // WiFi ist aus; 80 MHz genügen und sparen Strom. Die Zeitbasis (SYSTIMER,
+    // Quarz) und LEDC (APB-Takt) sind davon unabhängig.
+    Serial.flush();
+    setCpuFrequencyMhz(80);
+
+    ardf::duty::Guard guard;
+    uint8_t tx_counter = 0;   // Rufzeichen-Slot-Zähler (nur AFU)
+    uint32_t k = 0;           // Zyklusindex
+
+    while (true) {
+        uint64_t target = model.toLocal(
+            ardf::schedule::slotStartUs(start_ref, plan, slot_idx, k));
+        if (esp_timer_get_time() > target + 2000) {
+            // Slot verpasst (sollte nicht vorkommen) – nie verspätet senden
+            Serial.println(LOG_WARN "Slot verpasst – weiter mit dem nächsten Zyklus");
+            k++;
+            continue;
+        }
+        waitUntil(target);
+
+        bool send_callsign = is_afu && tx_counter == CALLSIGN_SLOT_TRIGGER;
+        uint32_t tx_ms = send_callsign ? tx_call_ms : tx_norm_ms;
+        uint64_t tx_start = esp_timer_get_time();
+
+        if (!guard.allows(tx_start)) {
+            // Letzte Instanz: sollte bei korrektem Slotplan nie greifen
+            Serial.printf(LOG_ERR "Duty-Guard: Sendung blockiert (Freigabe in %lu ms)\n",
+                          (unsigned long)((guard.nextAllowedUs() - tx_start) / 1000));
+        } else {
+            guard.record(tx_start, tx_ms, send_callsign);
+            if (send_callsign) {
+                Serial.printf(LOG_FOX "AFU-Slot: Rufzeichen %s wird gesendet\n", g_config.callsign);
+            }
+
+            ardf::tx::power(true);
+            delay(TX_WARMUP_MS);
+            ardf::morse::sendArdfSlot(
+                g_config.fox_id, g_config.profile_id,
+                g_config.callsign, send_callsign,
+                freq_hz, prof.wpm, prof.morse_repeats);
+            ardf::tx::toneOff();
+            ardf::tx::power(false);
+
+            if (is_afu) {
+                tx_counter = (tx_counter + 1) % CALLSIGN_SLOT_INTERVAL;
+            }
+        }
+        k++;
+    }
+}
+
+// ============================================================================
+// Solo-Betrieb (Profil D): Aussendung, dann Deep-Sleep
+// ============================================================================
+static void runSoloMode() {
     const ardf::FoxProfile& prof = ardf::getProfile(g_config.profile_id);
     uint16_t freq_hz = FOX_TONE_HZ[g_config.fox_id - 1];
 
-    // ---- Profil D: Einfacher Solo-Modus ----
-    if (prof.is_continuous) {
-        // Pausenzeit aus dem Duty-Guard (mindestens tone_off_ms)
-        uint32_t tx_ms = ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
-        ardf::duty::GuardCheck gc = ardf::duty::checkDuty(
-            g_config.profile_id, g_config.fox_id, 1, tx_ms, false);
+    // Pause aus dem ISM-sicheren Zyklus (mindestens tone_off_ms)
+    uint32_t tx_ms = ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
+    ardf::schedule::FoxTiming own = {g_config.fox_id, tx_ms, tx_ms};
+    ardf::schedule::CyclePlan plan = ardf::schedule::computePlan(g_config.profile_id, &own, 1);
 
-        // TX-Sequenz: Dauerton
-        ardf::tx::power(true);
-        delay(TX_WARMUP_MS);
-        ardf::tx::toneOn(freq_hz);
-        delay(prof.tone_on_ms);
-        ardf::tx::toneOff();
-        ardf::tx::power(false);
-
-        // Deep-Sleep für die Pausenzeit
-        enterDeepSleep((uint64_t)(gc.effective_cycle_ms - tx_ms) * 1000ULL);
-        return;
-    }
-
-    // ---- Profile A/B/C: ARDF-Modus ----
-
-    // Duty-Guard prüfen
-    bool is_afu = (g_config.callsign[0] != '\0');
-    bool send_callsign = false;
-
-    if (is_afu) {
-        // AFU-Modus: Callsign alle 10 Slots
-        if (tx_counter == CALLSIGN_SLOT_TRIGGER) {
-            send_callsign = true;
-        }
-    }
-
-    // TX-Zeit berechnen (MO-Kennung, ggf. + Pause + Rufzeichen)
-    uint32_t tx_on_ms = ardf::txBudgetMs(
-        g_config.profile_id, g_config.fox_id,
-        send_callsign ? g_config.callsign : nullptr);
-
-    // Duty-Guard-Prüfung
-    ardf::duty::GuardCheck gc = ardf::duty::checkDuty(
-        g_config.profile_id, g_config.fox_id,
-        rtc_active_count, tx_on_ms, send_callsign);
-
-    if (gc.result == ardf::duty::GuardResult::BLOCKIERT) {
-        Serial.println(LOG_ERR "Duty-Guard: Sendung blockiert!");
-        logDutyStatus(
-            g_config.profile_id, rtc_active_count,
-            gc.effective_slot_ms, gc.effective_cycle_ms,
-            tx_on_ms, gc.duty_percent, gc.decision_text);
-
-        // Fehlerbehandlung
-        rtc_error_state = ERR_DUTY_BLOCKED;
-        rtc_error_start_us = esp_timer_get_time();
-
-        // Nächsten Slot berechnen und schlafen
-        uint64_t sleep_us = calculateNextSlotUs(gc.effective_cycle_ms);
-        enterDeepSleep(sleep_us);
-        return;
-    }
-
-    if (send_callsign) {
-        Serial.printf(LOG_FOX "AFU-Slot: Rufzeichen %s wird gesendet (Slot %u/%u)\n",
-                      g_config.callsign, tx_counter + 1, CALLSIGN_SLOT_INTERVAL);
-    }
-
-    // ---- TX-Sequenz ----
+    // TX-Sequenz: Dauerton
     ardf::tx::power(true);
     delay(TX_WARMUP_MS);
-
-    // Morse senden
-    ardf::morse::sendArdfSlot(
-        g_config.fox_id, g_config.profile_id,
-        g_config.callsign, send_callsign,
-        freq_hz, prof.wpm, prof.morse_repeats);
-
+    ardf::tx::toneOn(freq_hz);
+    delay(prof.tone_on_ms);
     ardf::tx::toneOff();
     ardf::tx::power(false);
 
-    // tx_counter aktualisieren (nur im AFU-Modus)
-    if (is_afu) {
-        tx_counter++;
-        if (tx_counter >= CALLSIGN_SLOT_INTERVAL) {
-            tx_counter = 0;
-        }
-    }
-    // Im ISM-Modus: tx_counter bleibt 0
-
-    // Fehler-Zustand zurücksetzen
-    rtc_error_state = ERR_NONE;
-
-    // Nächsten Slot berechnen und Deep-Sleep
-    // Der Zyklus kommt aus dem Duty-Guard dieser Aussendung, nicht aus dem
-    // Sync-Zustand – so bleibt die Pause auch bei abweichendem Profil ISM-sicher.
-    uint64_t sleep_us = calculateNextSlotUs(gc.effective_cycle_ms);
-    enterDeepSleep(sleep_us);
+    // Deep-Sleep für die Pausenzeit
+    enterDeepSleep((uint64_t)(plan.cycle_ms - tx_ms) * 1000ULL);
 }
 
 // ============================================================================
-// Nächsten eigenen Slot berechnen
-// ============================================================================
-static uint64_t calculateNextSlotUs(uint32_t cycle_ms) {
-    uint64_t now_us = esp_timer_get_time();
-
-    // Nächster eigener Slot im Zyklus
-    uint64_t cycle_us = (uint64_t)cycle_ms * 1000ULL;
-
-    // Vorlaufzeit berechnen
-    uint32_t elapsed_s = 0;
-    if (rtc_last_sync_us > 0 && now_us > rtc_last_sync_us) {
-        elapsed_s = (uint32_t)((now_us - rtc_last_sync_us) / 1000000ULL);
-    }
-    uint32_t vorlauf_us = ardf::timesync::calculateVorlaufUs(rtc_drift_ppm, elapsed_s);
-
-    // Sleep-Zeit = Zykluszeit - Vorlauf
-    // (Wir wachen einen Zyklus später auf, da wir gerade gesendet haben)
-    uint64_t sleep_us = cycle_us;
-    if (sleep_us > vorlauf_us) {
-        sleep_us -= vorlauf_us;
-    } else {
-        sleep_us = VORLAUF_MIN_US; // Minimum: 100 ms
-    }
-
-    // Drift-Kompensation
-    if (rtc_drift_ppm != 0) {
-        // Korrektur: sleep_us * (1 - drift_ppm / 1e6)
-        int64_t correction = (int64_t)sleep_us * rtc_drift_ppm / 1000000LL;
-        sleep_us = (uint64_t)((int64_t)sleep_us - correction);
-    }
-
-    return sleep_us;
-}
-
-// ============================================================================
-// Deep-Sleep
+// Deep-Sleep (Profil D)
 // ============================================================================
 static void enterDeepSleep(uint64_t sleep_us) {
     // Sicherstellen, dass TX aus ist
@@ -392,67 +342,49 @@ static void enterDeepSleep(uint64_t sleep_us) {
 // Fehlerbehandlung
 // ============================================================================
 static void handleError(ErrorState error) {
-    rtc_error_state = error;
-    rtc_error_start_us = esp_timer_get_time();
-    uint64_t error_end_us = rtc_error_start_us + (uint64_t)ERROR_RECOVERY_MS * 1000ULL;
+    const ardf::sync::Network& net = ardf::sync::network();
+    uint64_t error_end_us = esp_timer_get_time() + (uint64_t)ERROR_RECOVERY_MS * 1000ULL;
 
     switch (error) {
         case ERR_FOX_COLLISION:
             Serial.println(LOG_ERR "FOX_ID-Kollision – kein Senden möglich!");
             Serial.println(LOG_ERR "Bitte Fox-Nummer über CLI ändern (Menüpunkt 2)");
-            while (esp_timer_get_time() < error_end_us) {
-                ardf::tx::blinkSos();
-                // CLI-Eingabe prüfen (für Neustart)
-                if (Serial.available()) {
-                    Serial.println(LOG_ERR "Automatische Wiederherstellung – Neustart in 3…2…1");
-                    delay(3000);
-                    esp_restart();
-                }
-                yield();
-            }
             break;
-
         case ERR_CONFIG_MISMATCH: {
-            const ardf::sync::SyncState& ss = ardf::sync::getSyncState();
+            const uint8_t* m = net.mismatchMac();
             Serial.println(LOG_ERR "Konfigurations-Abweichung im Verbund – kein Senden!");
             Serial.printf(LOG_ERR "Abweichender Fuchs: Fox %u, Profil %c, "
                           "MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
-                          ss.mismatch_fox_id,
-                          ardf::getProfileChar(ss.mismatch_profile_id),
-                          ss.mismatch_mac[0], ss.mismatch_mac[1], ss.mismatch_mac[2],
-                          ss.mismatch_mac[3], ss.mismatch_mac[4], ss.mismatch_mac[5]);
-            while (esp_timer_get_time() < error_end_us) {
-                ardf::tx::blinkMismatch();
-                if (Serial.available()) {
-                    Serial.println(LOG_ERR "Automatische Wiederherstellung – Neustart in 3…2…1");
-                    delay(3000);
-                    esp_restart();
-                }
-                yield();
-            }
+                          net.mismatchFoxId(), ardf::getProfileChar(net.mismatchProfileId()),
+                          m[0], m[1], m[2], m[3], m[4], m[5]);
             break;
         }
-
+        case ERR_NOT_IN_PLAN:
+            Serial.println(LOG_ERR "Fuchs ist nicht im Slotplan – Slotplan war schon fest");
+            Serial.println(LOG_ERR "Zu spät eingeschaltet? Alle Füchse vor dem Sendebeginn einschalten");
+            break;
+        case ERR_SYNC_INIT:
+            Serial.println(LOG_ERR "ESP-NOW-Start fehlgeschlagen – kein Senden ohne Synchronisation");
+            break;
         case ERR_INVALID_CONFIG:
             Serial.println(LOG_ERR "Ungültige Konfiguration – kein Senden!");
-            while (esp_timer_get_time() < error_end_us) {
-                ardf::tx::blinkInvalid();
-                if (Serial.available()) {
-                    Serial.println(LOG_ERR "Automatische Wiederherstellung – Neustart in 3…2…1");
-                    delay(3000);
-                    esp_restart();
-                }
-                yield();
-            }
             break;
-
-        case ERR_DUTY_BLOCKED:
-            Serial.println(LOG_ERR "Duty-Guard hat die Sendung blockiert");
-            // Bei Duty-Block kein 60-s-Loop, sondern direkt Sleep zum nächsten Slot
-            return;
-
         default:
             break;
+    }
+
+    ardf::sync::finishSync();
+
+    while (esp_timer_get_time() < error_end_us) {
+        switch (error) {
+            case ERR_FOX_COLLISION:   ardf::tx::blinkSos();      break;
+            case ERR_CONFIG_MISMATCH:
+            case ERR_NOT_IN_PLAN:     ardf::tx::blinkMismatch(); break;
+            default:                  ardf::tx::blinkInvalid();  break;
+        }
+        // CLI-Eingabe prüfen (für Neustart)
+        if (Serial.available()) break;
+        yield();
     }
 
     // Auto-Recovery nach 60 s
