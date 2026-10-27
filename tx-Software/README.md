@@ -1,6 +1,6 @@
 # ARDF-Fuchsjagd-Sender ESP32-C3
 
-**Version 2.0.0** – Juli 2026
+**Version 2.1.0** – Oktober 2026
 
 Ein vollständiger ARDF-Fuchsjagd-Sender für das 70-cm-Band (433,920 MHz) auf Basis des
 ESP32-C3 mit PlatformIO, ESP-NOW-Synchronisation, dynamischen Profilen, Duty-Guard und
@@ -21,13 +21,17 @@ Unterschiede zur Original-Basis:
 - Original: ~94 LOC Arduino INO, 880 Hz Dauerton, 200 ms TX / 1800 ms Sleep,
   keine Kennung, kein Sync, kein ARDF
 - Diese Version: PlatformIO, ESP32-C3, 5-Fuchs ARDF mit MOE/MOI/MOS/MOH/MO5,
-  ESP-NOW-Zeitsynchronisation, Duty-Guard <9,5 % (ISM),
+  ESP-NOW-Synchronisation mit gemeinsamem Slotplan, Duty-Guard < 9,5 % (ISM),
   Profile A/B/C/D, deutschsprachige CLI, NVS-Persistenz,
-  Zeitdrift-Kompensation, konsequenter Deep-Sleep
+  Zeitdrift-Kompensation, Deep-Sleep im Solo-Profil D
 
-Lizenz: MIT – siehe `LICENSE`, `NOTICE`, `AUTHORS.md`.
+Lizenz: MIT – siehe `LICENSE` und `AUTHORS.md`.
 
 Erstellung mit KI-Assistenz, fachliche Verantwortung und Freigabe: DM8SB.
+
+> **Update von 2.0.x:** Das Sync-Protokoll ist inkompatibel geändert (Version 3).
+> Alle Füchse eines Verbunds müssen dieselbe Firmware haben. Die gespeicherte
+> Konfiguration (Fox-ID, Profil, Rufzeichen) wird beim ersten Start übernommen.
 
 ---
 
@@ -40,7 +44,7 @@ Erstellung mit KI-Assistenz, fachliche Verantwortung und Freigabe: DM8SB.
 - [Synchronisation und Verteilung](#synchronisation-und-verteilung)
 - [Serielle CLI-Befehle](#serielle-cli-befehle)
 - [LED- und Fehlercodes](#led--und-fehlercodes)
-- [Driftkorrektur](#driftkorrektur)
+- [Zeitsynchronisation und Stromverbrauch](#zeitsynchronisation-und-stromverbrauch)
 - [Build und Flash](#build-und-flash)
 - [Lizenz](#lizenz)
 
@@ -68,19 +72,30 @@ Die Hardware basiert auf der [draussenfuchs.de](https://draussenfuchs.de/)-Platt
 ### Hinweise
 
 - Das TX-Modul wird über GPIO4 eingeschaltet (HIGH = an, LOW = aus/stromlos)
-- Die LEDs auf GPIO7 und GPIO8 werden parallel angesteuert und sind active LOW
+- Im Deep-Sleep werden GPIO3 und GPIO4 per Pin-Hold auf LOW gehalten
+- Die LEDs auf GPIO7 und GPIO8 werden parallel angesteuert und sind active LOW.
+  Dieselbe Firmware läuft deshalb auf beiden Boards.
+- Lolin C3 Mini: Je nach Board-Revision sitzt an GPIO7 eine RGB-LED (WS2812), die auf
+  einfache Pegel nicht reagiert. Dann bleibt die LED-Anzeige dunkel (bitte am eigenen
+  Board prüfen).
 - Keine DIP-Schalter – Konfiguration ausschließlich per serieller CLI
 
 ---
 
 ## Rechtliche Hinweise
 
+Die Firmware setzt die folgenden Grenzen technisch um. Ob sie für den eigenen Betrieb
+genügen, muss der Betreiber selbst prüfen; die Angaben sind keine Rechtsberatung.
+
 ### ISM-Betrieb (Standard)
 
 - **Frequenz:** 433,920 MHz (ISM/SRD-Band 433,050–434,790 MHz)
 - **Sendeleistung:** ca. 10 mW ERP
 - **Duty Cycle:** < 10 % gemäß Allgemeinzuteilung SRD/ISM
-- **Duty-Guard:** Strikt auf < 9,5 % limitiert (5 % Sicherheitsaufschlag)
+- **Duty-Guard:** Strikt auf ≤ 9,5 % limitiert, gerechnet mit 5 % Aufschlag auf das
+  Sendezeit-Budget (Zeit, in der das TX-Modul versorgt ist: 20 ms Vorlauf + komplette
+  Morsesequenz inkl. Pausen). Vor jeder Aussendung prüft ein Laufzeit-Guard zusätzlich
+  den Abstand zur vorherigen Aussendung.
 - **Rufzeichen:** Kein Rufzeichen im ISM-Betrieb (CALLSIGN = "")
 - Kein Peil-Dauerton in Profilen A/B/C
 - Ausschließlich standardisierte kurze Morse-Kennungen
@@ -89,75 +104,99 @@ Die Hardware basiert auf der [draussenfuchs.de](https://draussenfuchs.de/)-Platt
 
 - **Rufzeichen (CALLSIGN)** nur für lizenzierte Funkamateure
 - Das Setzen eines Rufzeichens aktiviert den AFU-Modus
-- Rufzeichensendung: Jeden 10. Slot (MO-Kennung + 7 dits Pause + Rufzeichen)
-- **Ausnahmeregelung Duty im 10. Slot:** Duty-Guard-Grenze wird auf max. 50 % angehoben
-  (gesetzliche 10-%-ISM-Einschränkung gilt im Amateurfunkbetrieb nicht in derselben Form)
-- In den Slots 1–9 bleibt die strenge 9,5-%-Grenze aktiv
+- Rufzeichensendung: Bei jeder 10. Aussendung (MO-Kennung + 7 dits Pause + Rufzeichen)
+- **Duty im Rufzeichen-Slot:** Die Firmware erlaubt dort bis 50 % (die
+  10-%-ISM-Einschränkung gilt im Amateurfunkbetrieb nicht in derselben Form). Bei allen
+  anderen Aussendungen bleibt die 9,5-%-Grenze aktiv.
+- Damit die Rufzeichen-Aussendung nicht in den Slot des nächsten Fuchses ragt, wird der
+  Slot im AFU-Modus entsprechend verlängert (siehe [AFU-Modus](#afu-modus))
+- Vom Betreiber zu prüfen: Kennungsintervall und Regeln für den unbemannten Betrieb
+  nach AFuV (bei Profil A mit einem Fuchs liegen zwischen zwei Rufzeichen ca. 9 min)
 - **Warnung:** Im ISM-Betrieb das Rufzeichen leer lassen!
 
 ---
 
 ## Profile
 
-| Eigenschaft       | A – Standard    | B – Sprint      | C – Ultra (Default) | D – Solo         |
-|:------------------|:----------------|:----------------|:--------------------|:-----------------|
-| Füchse            | 5               | 5               | 5                   | 1                |
-| Zyklus            | 60 s            | 30 s            | 20 s                | 2,4 s            |
-| Slot              | 12 s            | 6 s             | 4 s                 | 2,4 s            |
-| WPM               | 18              | 20              | 24                  | –                |
-| MO-Wiederholungen | 2×              | 1×              | 1×                  | –                |
-| Sendeinhalt       | MO-Kennung      | MO-Kennung      | MO-Kennung          | Dauerton         |
-| TX-Dauer (ca.)    | 3,8–4,9 s       | 1,5–2,0 s       | 1,3–1,7 s           | 200 ms           |
-| Duty              | 6,3–8,1 %       | 5,1–6,6 %       | 6,3–8,3 %           | 8,33 %           |
-| ESP-NOW           | Ja              | Ja              | Ja                  | Nein             |
-| CLI-Timeout       | 120 s           | 120 s           | 120 s               | 30 s             |
+| Eigenschaft        | A – Standard    | B – Sprint      | C – Ultra (Default) | D – Solo         |
+|:-------------------|:----------------|:----------------|:--------------------|:-----------------|
+| Füchse             | 5               | 5               | 5                   | 1                |
+| Zyklus (5 Füchse)  | 60 s            | 30 s            | 20 s                | 2,43 s           |
+| Slot               | 12 s            | 6 s             | 4 s                 | –                |
+| WPM                | 18              | 20              | 24                  | –                |
+| MO-Wiederholungen  | 2×              | 1×              | 1×                  | –                |
+| Sendeinhalt        | MO-Kennung      | MO-Kennung      | MO-Kennung          | Dauerton         |
+| TX-Budget          | 3,8–4,8 s       | 1,5–2,0 s       | 1,3–1,7 s           | 220 ms           |
+| Duty (5 Füchse)    | 6,6–8,5 %       | 5,3–7,0 %       | 6,7–8,8 %           | 9,5 % (Ton 8,2 %)|
+| ESP-NOW            | Ja              | Ja              | Ja                  | Nein             |
+| Sendebeginn        | nach Sync (Master) | nach Sync (Master) | nach Sync (Master) | 30 s Inaktivität |
+| Betrieb            | wach, WiFi aus  | wach, WiFi aus  | wach, WiFi aus      | Deep-Sleep       |
+
+*TX-Budget und Duty je nach Fox-ID (MOE kürzeste, MO5 längste Kennung); Duty inkl.
+5 % Sicherheitsaufschlag.*
 
 ### Profil D: draussenfuchs Solo
 
 - Profil D: draussenfuchs-ähnlich, ISM-sicher, Solo, fox-spezifische Tonhöhe, keine ARDF-Synchronisation
-- Dauerton: 200 ms ON / 2.200 ms OFF
+- Dauerton: 200 ms ON (+ 20 ms Vorlauf), 2.212 ms Pause
 - Ton: Fox-spezifisch (700/800/900/1000/1200 Hz je nach Fox-ID)
 - Keine MO-Kennung, kein ESP-NOW, kein Sync
-- Duty-Cycle: exakt 8,33 %
+- Duty-Cycle: 9,5 % nach Budget-Definition inkl. Aufschlag, reine Tonzeit ca. 8,2 %
+- Die CLI ist im Betrieb nur nach einem Reset (RST-Taste) erreichbar
 
 ---
 
 ## Dynamische Zykluszeiten
 
-Bei weniger als 5 aktiven Füchsen passt sich der Zyklus automatisch an die maximale
-ISM-sichere Wiederholrate an.
+Bei weniger als 5 aktiven Füchsen verkürzt sich der Zyklus bis zur maximalen
+ISM-sicheren Wiederholrate. Maßgeblich ist die **längste Aussendung im Verbund**, alle
+Füchse verwenden denselben Slotplan. Die Tabellen zeigen den ungünstigsten Fall (MO5 ist
+aktiv); ohne MO5 wird der Zyklus etwas kürzer.
 
 ### Profil A (18 WPM, 2× MO)
 
-| Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Duty (Worst Case) |
-|--------------:|-------------------:|------------------:|------------------:|
-|             1 |          12.000 ms |       ~54.200 ms  |          ~9,5 %   |
-|             2 |          24.000 ms |       ~54.200 ms  |          ~9,5 %   |
-|             3 |          36.000 ms |       ~54.200 ms  |          ~9,5 %   |
-|             4 |          48.000 ms |       ~54.200 ms  |          ~9,5 %   |
-|             5 |          60.000 ms |        60.000 ms  |          ~8,1 %   |
+| Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Slot      | Duty   |
+|--------------:|-------------------:|------------------:|----------:|-------:|
+|             1 |          12.000 ms |         53.479 ms | 53.479 ms | 9,5 %  |
+|             2 |          24.000 ms |         53.479 ms | 26.739 ms | 9,5 %  |
+|             3 |          36.000 ms |         53.479 ms | 17.826 ms | 9,5 %  |
+|             4 |          48.000 ms |         53.479 ms | 13.369 ms | 9,5 %  |
+|             5 |          60.000 ms |         60.000 ms | 12.000 ms | 8,5 %  |
 
 ### Profil B (20 WPM, 1× MO)
 
-| Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Duty (Worst Case) |
-|--------------:|-------------------:|------------------:|------------------:|
-|             1 |           6.000 ms |       ~22.100 ms  |          ~9,5 %   |
-|             2 |          12.000 ms |       ~22.100 ms  |          ~9,5 %   |
-|             3 |          18.000 ms |       ~22.100 ms  |          ~9,5 %   |
-|             4 |          24.000 ms |        24.000 ms  |          ~8,7 %   |
-|             5 |          30.000 ms |        30.000 ms  |          ~7,0 %   |
+| Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Slot      | Duty   |
+|--------------:|-------------------:|------------------:|----------:|-------:|
+|             1 |           6.000 ms |         22.109 ms | 22.109 ms | 9,5 %  |
+|             2 |          12.000 ms |         22.109 ms | 11.054 ms | 9,5 %  |
+|             3 |          18.000 ms |         22.109 ms |  7.369 ms | 9,5 %  |
+|             4 |          24.000 ms |         24.000 ms |  6.000 ms | 8,8 %  |
+|             5 |          30.000 ms |         30.000 ms |  6.000 ms | 7,0 %  |
 
 ### Profil C (24 WPM, 1× MO) – Default
 
-| Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Duty (Worst Case) |
-|--------------:|-------------------:|------------------:|------------------:|
-|             1 |           4.000 ms |       ~18.500 ms  |          ~9,5 %   |
-|             2 |           8.000 ms |       ~18.500 ms  |          ~9,5 %   |
-|             3 |          12.000 ms |       ~18.500 ms  |          ~9,5 %   |
-|             4 |          16.000 ms |       ~18.500 ms  |          ~9,5 %   |
-|             5 |          20.000 ms |        20.000 ms  |          ~8,8 %   |
+| Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Slot      | Duty   |
+|--------------:|-------------------:|------------------:|----------:|-------:|
+|             1 |           4.000 ms |         18.460 ms | 18.460 ms | 9,5 %  |
+|             2 |           8.000 ms |         18.460 ms |  9.230 ms | 9,5 %  |
+|             3 |          12.000 ms |         18.460 ms |  6.153 ms | 9,5 %  |
+|             4 |          16.000 ms |         18.460 ms |  4.615 ms | 9,5 %  |
+|             5 |          20.000 ms |         20.000 ms |  4.000 ms | 8,8 %  |
 
-*Werte gerundet; tatsächliche Zeiten hängen von der Fox-ID ab (MO5 ist am längsten).*
+*Werte aus dem Code berechnet (inkl. einer Reserve von 100 ppm für Taktabweichungen).
+Menüpunkt 5 der CLI zeigt die Werte für die eigene Konfiguration.*
+
+### AFU-Modus
+
+Der Slot ist mindestens so lang wie die längste Aussendung im Verbund plus 250 ms
+Schutzabstand. Mit Rufzeichen wird der Zyklus deshalb länger, z. B. bei 5 Füchsen und
+dem Rufzeichen „DL1ABC/P":
+
+| Profil | Längste Aussendung | Slot     | Zyklus    |
+|:-------|-------------------:|---------:|----------:|
+| A      |          12.098 ms | 12.348 ms | 61.740 ms |
+| B      |           8.600 ms |  8.850 ms | 44.250 ms |
+| C      |           7.170 ms |  7.420 ms | 37.100 ms |
 
 ---
 
@@ -168,43 +207,57 @@ ISM-sichere Wiederholrate an.
 1. **Vorbereitung:**
    - Alle Sender mit identischem Profil (A, B oder C) konfigurieren
    - Jedem Sender eine eindeutige Fox-Nummer (1..5) zuweisen
-   - Rufzeichen nur setzen, wenn Amateurfunklizenz vorhanden
+   - Rufzeichen nur setzen, wenn Amateurfunklizenz vorhanden (dann bei allen Füchsen)
 
 2. **Einschalten:**
-   - Alle Sender innerhalb weniger Sekunden einschalten
-   - Die Discovery-/Sync-Phase startet automatisch (120 s)
-   - Die LEDs blinken im Herzschlag-Takt (2 Hz)
+   - Alle Sender möglichst gemeinsam einschalten – **spätestens 15 s vor dem
+     Sendebeginn**; 10 s vorher wird der Slotplan festgelegt
+   - Die Sync-Phase startet automatisch, die LEDs blinken im Herzschlag-Takt (2 Hz)
 
 3. **Synchronisation:**
-   - Die Sender tauschen automatisch ESP-NOW-Beacons aus
-   - Master-Wahl erfolgt automatisch (höchste MAC-Adresse)
+   - Die Sender tauschen ESP-NOW-Beacons aus (2 pro Sekunde)
+   - Master ist der Sender mit der höchsten MAC-Adresse
+   - Der Master legt den Slotplan fest (Zyklus, Slot, Reihenfolge nach Fox-ID) und den
+     **Sendebeginn: 120 s nach dem Einschalten des ersten Fuchses**. Später
+     eingeschaltete Füchse übernehmen diesen Zeitpunkt.
+   - Jeder Slave misst dabei Offset und Taktabweichung seiner Uhr gegenüber dem Master
    - Fehler werden über LED-Codes und Serial angezeigt
 
 4. **Überprüfung (optional):**
    - Enter drücken, um die CLI zu öffnen
-   - Menüpunkt 6 (Sync-Status) zeigt erkannte Nachbarn
+   - Menüpunkt 6 (Sync-Status) zeigt Master, Slotplan, Sendebeginn und Nachbarn
    - Menüpunkt 5 (Duty-Cycle) zeigt die berechneten Zeiten
 
 5. **Start:**
-   - Menüpunkt 10 oder Warten auf Auto-Timeout (120 s)
-   - Die Sender beginnen synchron im zugewiesenen Zeitraster
+   - Automatisch zum Sendebeginn; Menüpunkt 10 am Master zieht ihn für alle vor
+     (Start dann nach 5 s)
+   - Alle Sender senden im gemeinsamen Zeitraster, jeder in seinem Slot
 
 6. **Verteilung im Gelände:**
    - Nach dem Start die Sender an den gewünschten Positionen aufstellen
-   - Keine weitere Konfiguration notwendig
-   - Die Synchronisation bleibt über die Driftkorrektur erhalten
+   - Keine weitere Konfiguration notwendig, kein Funkkontakt zwischen den Füchsen nötig
+   - Die Sender bleiben über die Quarzuhr und die gemessene Taktabweichung synchron
+     (in der Simulation nach 3 h auf wenige Millisekunden genau)
 
 ### Allein-Boot (einzelner Sender)
 
-- Wird kein Nachbar erkannt, sendet der Fuchs autonom
-- `active_count = 1`, eigener Master-Status
-- Maximale ISM-sichere Wiederholrate wird automatisch berechnet
+- Wird kein Nachbar erkannt, ist der Fuchs sein eigener Master und sendet autonom
+- Die maximale ISM-sichere Wiederholrate wird automatisch berechnet
+
+### Nachzügler
+
+Ein Fuchs, der erst nach dem Festlegen des Slotplans eingeschaltet wird, ist nicht im
+Plan. Er sendet dann nicht (LED 3× kurz), statt das Raster der anderen zu stören. Nach
+dem Sendebeginn hört er keinen Verbund mehr und würde als Allein-Boot unsynchronisiert
+senden – deshalb **alle Füchse vor dem Sendebeginn einschalten** bzw. bei einem
+nachträglichen Tausch alle Füchse neu starten.
 
 ---
 
 ## Serielle CLI-Befehle
 
-Verbindung: 115200 Baud, 8N1, USB-CDC
+Verbindung: 115200 Baud, 8N1, USB-CDC. Das Terminal sollte UTF-8 darstellen (Umlaute,
+Gedankenstriche).
 
 ```
 ARDF-Fuchsjagd-Sender – Konfiguration
@@ -223,12 +276,16 @@ ARDF-Fuchsjagd-Sender – Konfiguration
  h) Hilfe
 ```
 
+- Änderungen an Fox-Nummer, Profil, Rufzeichen oder Werkseinstellungen werden erst nach
+  einem **Neustart** wirksam; die CLI fragt danach, und bis dahin ist der Normalbetrieb
+  gesperrt
+- Rückfragen ohne Antwort brechen nach 30 s ab (Wert unverändert)
+
 ### Hinweis zur seriellen Schnittstelle
 
-- **ESP32-C3 Super Mini** (nativer USB-Serial/JTAG): Build-Flags
-  `ARDUINO_USB_CDC_ON_BOOT=1`, `ARDUINO_USB_MODE=1` (bereits konfiguriert)
-- **Lolin C3 Mini** (CH340/CH9102 USB-to-Serial): Ggf. `ARDUINO_USB_MODE=0`
-  in der `platformio.ini` setzen
+- **ESP32-C3 Super Mini** und **Lolin C3 Mini** nutzen den nativen USB-Serial/JTAG des
+  ESP32-C3. Die Build-Flags `ARDUINO_USB_CDC_ON_BOOT=1` und `ARDUINO_USB_MODE=1` sind
+  bereits gesetzt.
 
 Vollständige CLI-Dokumentation: [`docs/cli.md`](docs/cli.md)
 
@@ -236,48 +293,53 @@ Vollständige CLI-Dokumentation: [`docs/cli.md`](docs/cli.md)
 
 ## LED- und Fehlercodes
 
-| Zustand                 | LED-Muster                              | TX aktiv? |
-|:------------------------|:----------------------------------------|:----------|
-| Normalbetrieb TX        | Synchron im Ton-Takt                    | Ja        |
-| CLI aktiv / Idle        | 0,5 Hz langsam (500 ms an / 1500 ms aus)| Nein      |
-| Boot / Sync läuft       | 2 Hz Herzschlag                         | Nein      |
-| FOX_ID-Kollision        | SOS (…---…) wiederholt, Pause 1,2 s     | Nein      |
-| Profil-/Config-Mismatch | 3× kurz (150 ms), Pause 1 s             | Nein      |
-| Ungültige Konfiguration | 10 Hz Dauerblinken                       | Nein      |
-| Duty-Guard blockiert    | 2× kurz, Pause 2 s                      | Nein      |
+| Zustand                         | LED-Muster                               | TX aktiv? |
+|:--------------------------------|:-----------------------------------------|:----------|
+| Normalbetrieb TX                | Synchron im Ton-Takt, sonst aus          | Ja        |
+| Startphase mit Sync (A–C)       | 2 Hz Herzschlag (250 ms an / 250 ms aus) | Nein      |
+| Startphase ohne Sync (D)        | 0,5 Hz (500 ms an / 1500 ms aus)         | Nein      |
+| FOX_ID-Kollision                | SOS (···−−−···) wiederholt, Pause 1,2 s  | Nein      |
+| Konfigurations-Abweichung       | 3× kurz (150 ms), Pause 1 s              | Nein      |
+| Nicht im Slotplan (Nachzügler)  | 3× kurz (150 ms), Pause 1 s              | Nein      |
+| Ungültige Konfiguration / ESP-NOW-Fehler | 10 Hz Dauerblinken              | Nein      |
+| Duty-Guard blockiert            | 2× kurz, Pause 2 s (bis zur nächsten erlaubten Aussendung) | Nein |
 
 ### Fehler-Erholung
 
 - Alle Fehlerzustände werden über Serial mit `[ERR]`-Prefix ausgegeben
-- Nach 60 Sekunden im Fehlerzustand erfolgt ein automatischer Neustart
-- Manueller Neustart jederzeit über Menüpunkt 11
+- Im Fehlerzustand bleibt die CLI bedienbar (Enter): Konfiguration prüfen bzw. ändern,
+  dann Neustart (Menüpunkt 11)
+- Nach 60 s ohne Eingabe: automatischer Neuversuch per Neustart bei Kollision,
+  Konfigurations-Abweichung oder ESP-NOW-Fehler, höchstens 5-mal
+- Danach (bzw. sofort bei „nicht im Slotplan") Tiefschlaf ohne Senden bis zum Reset
+  (RST-Taste), damit der Akku nicht leerläuft
 
 ---
 
-## Driftkorrektur
+## Zeitsynchronisation und Stromverbrauch
 
 ### Funktionsweise
 
-- Während der Sync-Phase werden Clock-Offsets zwischen den Sendern gemessen
-- Lineare Regression berechnet die Drift in ppm
-- Ausreißer-Filterung über Median / MAD (Median Absolute Deviation)
-- Ergebnisse werden im NVS gespeichert und beim nächsten Start wiederverwendet
+- Während der Sync-Phase misst jeder Slave Paare aus Master-Zeit und Empfangszeit
+- Ausreißer werden per Median/MAD verworfen, eine lineare Regression liefert Offset und
+  Taktabweichung (ppm) gegenüber dem Master
+- Jeder Sendezeitpunkt wird absolut aus dem Slotplan berechnet und in die lokale Uhr
+  umgerechnet – Fehler summieren sich nicht auf
+- Im ARDF-Betrieb bleibt der Fuchs nach der Sync-Phase **wach** (WiFi aus, CPU 80 MHz),
+  damit alle Zeiten über den Quarz laufen. Der Deep-Sleep-Timer läuft auf einem internen
+  RC-Oszillator, der für ein gemeinsames Slotraster zu ungenau ist.
+- Die letzte Messung wird zur Anzeige im NVS gespeichert (Menüpunkt 7); beim nächsten
+  Einsatz wird neu gemessen, weil die Abweichung relativ zum jeweiligen Master gilt
 
-### Vorlaufberechnung
+### Stromverbrauch
 
-```
-vorlauf = 80 ms + |drift_ppm| × elapsed_s + 20 ms
-```
+- **Profile A–C:** dauerhaft einige mA (wach bei 80 MHz, WiFi aus; erwartet ca.
+  10–20 mA, auf der eigenen Hardware messen) plus TX-Modul während der Aussendungen.
+  Während der Sync-Phase ist WiFi aktiv (deutlich mehr).
+- **Profil D:** Deep-Sleep zwischen den Aussendungen (µA-Bereich)
 
-Begrenzt auf 100 ms ≤ Vorlauf ≤ 350 ms.
-
-### Empfehlung für längere Einsätze
-
-Bei Einsätzen über **60 Minuten** wird ein Neustart (Aus-/Einschalten) aller Sender
-empfohlen. Dadurch wird eine frische Sync-Phase mit neuer Driftmessung durchgeführt.
-Die im NVS gespeicherten Driftwerte dienen als Initialwerte.
-
-Ausführliche Dokumentation: [`docs/time_sync.md`](docs/time_sync.md)
+Ausführliche Dokumentation: [`docs/time_sync.md`](docs/time_sync.md),
+[`docs/sync_protocol.md`](docs/sync_protocol.md), [`docs/duty_cycle.md`](docs/duty_cycle.md)
 
 ---
 
@@ -308,14 +370,18 @@ pio device monitor -b 115200
 
 ### Tests
 
+Die hardwareunabhängige Logik (Morse-Timing, Duty-Guard, Slotplan, Zeitmodell,
+Verbund-Simulation, CRC) wird nativ auf dem PC getestet:
+
 ```bash
-pio test
+pio test -e native       # GCC im PATH (Linux, macOS, Windows mit MinGW)
+pio test -e native_win   # Windows ohne GCC: PlatformIO lädt MinGW selbst
 ```
 
 ### Hinweis: Deep-Sleep und Flashing
 
-Dieses Programm verwendet Deep-Sleep. Im Deep-Sleep ist der ESP32-C3 nicht als
-serielles Gerät erreichbar. Zum erneuten Flashen:
+Profil D (und der Tiefschlaf nach dauerhaften Fehlern) verwendet Deep-Sleep. Im
+Deep-Sleep ist der ESP32-C3 nicht als serielles Gerät erreichbar. Zum erneuten Flashen:
 
 1. **Boot**-Taste gedrückt halten
 2. **RST**-Taste kurz drücken
@@ -324,14 +390,23 @@ serielles Gerät erreichbar. Zum erneuten Flashen:
 
 ### Plattformversion
 
-`espressif32 @ ^6.8.0` stellt sicher, dass Arduino ESP32 Core ≥ 3.0 verwendet wird.
-Dieser Core unterstützt die neue pin-basierte LEDC-API (`ledcAttach`, `ledcWriteTone`).
+`espressif32 @ 6.13.0` ist exakt gepinnt und liefert den Arduino-ESP32-Core **2.0.17**
+(kanalbasierte LEDC-API `ledcSetup`/`ledcAttachPin`). Der Code enthält zusätzlich eine
+Kompatibilitätsschicht für Core 3.x (`ledcAttach`), die aber nicht getestet ist.
+
+### Fehlerbehebung
+
+- `ModuleNotFoundError: No module named 'intelhex'` beim Erzeugen von `bootloader.bin`:
+  Der PlatformIO-Umgebung fehlt ein Python-Paket. Abhilfe:
+  `~/.platformio/penv/Scripts/python -m pip install intelhex` (Windows) bzw.
+  `~/.platformio/penv/bin/python -m pip install intelhex`, alternativ PlatformIO
+  aktualisieren.
 
 ---
 
 ## Lizenz
 
-MIT License – siehe [`LICENSE`](LICENSE), [`NOTICE`](NOTICE), [`AUTHORS.md`](AUTHORS.md).
+MIT License – siehe [`LICENSE`](LICENSE) und [`AUTHORS.md`](AUTHORS.md).
 
 Copyright (c) 2025 Harm  , DK4HAA – [draussenfuchs.de](https://draussenfuchs.de/)
 Copyright (c) 2026 Sebastian , DM8SB

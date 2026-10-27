@@ -156,9 +156,11 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 - [ ] **P2 – 2.6 Rechtliche Aussagen zum AFU-Modus fachlich prüfen lassen**
   README „Rechtliche Hinweise", [config.h:50](../src/config.h#L50)
   Dass im 10. Slot 50 % Duty zulässig sind, die Slots 1–9 aber unter SRD-Regeln laufen, ist eine Mischform. Entweder ist der Betrieb Amateurfunk, dann gelten AFuV-Regeln (u. a. Kennungsintervall, unbemannter Betrieb), oder SRD. Empfehlung: einen eigenen **AFU-Modus** mit IARU-ARDF-Standardtiming (z. B. 60 s pro Fuchs, 5-min-Zyklus) und Kennung nach AFuV, klar getrennt vom ISM-Modus. Das Kennungsintervall gegen die AFuV prüfen: Profil A mit 1 Fuchs × 10 Slots ≈ 10 min ist grenzwertig.
+  **Teilweise erledigt:** README und `docs/duty_cycle.md` formulieren die AFU-Regeln jetzt als *technische Umsetzung*, die der Betreiber rechtlich prüfen muss (Kennungsintervall, unbemannter Betrieb; Profil A mit einem Fuchs: ca. 9 min zwischen zwei Rufzeichen). **Offen:** fachliche/rechtliche Prüfung durch einen Lizenzinhaber; ein separater AFU-Modus nach IARU-Regeln wäre eine Erweiterung.
 
-- [ ] **P2 – 2.7 Duty-Cycle-Bezugszeitraum dokumentieren**
+- [x] **P2 – 2.7 Duty-Cycle-Bezugszeitraum dokumentieren**
   ERC/REC 70-03 definiert den Duty-Cycle über ein Beobachtungsintervall von 1 h. Der Guard prüft pro Zyklus, was strenger und damit sicher ist. Trotzdem in `docs/duty_cycle.md` erläutern und die Quellen (Vfg./Allgemeinzuteilung der BNetzA, EN 300 220) mit Nummer zitieren.
+  **Erledigt:** `docs/duty_cycle.md`: Bezugszeitraum 1 h nach ERC/REC 70-03 erläutert; die Firmware prüft strenger je Aussendungsabstand. Quellen (BNetzA-Allgemeinzuteilung, ERC/REC 70-03, EN 300 220) genannt, mit Hinweis auf eigene Prüfung der aktuellen Fassung.
 
 ---
 
@@ -240,8 +242,9 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   **Teilweise erledigt:** Version einheitlich 2.1.0 (Protokoll v3 ist inkompatibel zu 2.0.x). Der Fallback in `config.h` bleibt bewusst für Builds ohne Build-Flag. Version aus `git describe` per `extra_scripts` nicht umgesetzt (Build-Erweiterung).
 - [x] **P3 – 4.9 Feste Array-Größe `[5]`** in `SyncBeacon::active_fox_ids` statt `MAX_FOXES`.
   **Erledigt:** Beacon und Slotplan verwenden `MAX_FOXES`.
-- [ ] **P3 – 4.10 Kommentar und Realität beim Arduino-Core**
+- [x] **P3 – 4.10 Kommentar und Realität beim Arduino-Core**
   [tx_driver.cpp:17-19](../src/tx_driver.cpp#L17-L19) ist korrekt (Core 2.x), die README behauptet „≥ 3.0" (→ 7.1). Die `#if`-Kompatibilitätsschicht ist gut, mit Core 3.x aber ungetestet. Entweder eine Plattformversion festpinnen oder beide Varianten im CI bauen.
+  **Erledigt:** README korrigiert: Plattform 6.13.0 liefert Core 2.0.17; die Core-3.x-Kompatibilitätsschicht ist als ungetestet gekennzeichnet.
 - [ ] **P3 – 4.11 Statische Analyse und Formatierung**
   `build_flags = -Wall -Wextra` aktivieren, `pio check` (cppcheck/clang-tidy) einführen, eine `.clang-format` hinzufügen.
   **Teilweise erledigt:** `build_src_flags = -Wall -Wextra -Wsign-compare -Wformat` (das Framework schaltet sign-compare/format ab; dabei einen echten Vorzeichenvergleich und einen unbenutzten Parameter gefunden und behoben). `-Wunused-parameter` würde in Framework-Headern warnen und wird stattdessen in den nativen Tests (`-Wall -Wextra`) geprüft. Stand: keine Warnungen. `pio check`/clang-format nicht eingeführt (Werkzeug-Erweiterung).
@@ -268,8 +271,10 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   - `platform = espressif32 @ 6.8.x` exakt pinnen (reproduzierbare Builds).
   - `lib_deps =` ist leer, also entfernen.
   **Erledigt:** Plattform exakt auf `espressif32 @ 6.13.0` gepinnt (Arduino-Core 2.0.17), leeres `lib_deps` entfernt, `default_envs` gesetzt. Eine eigene Super-Mini-Env ist nicht nötig: Die Firmware steuert beide LED-Pins (GPIO7 und GPIO8) parallel und läuft unverändert auf beiden Boards (in der README dokumentiert).
-- [ ] **P2 – 5.4 CI (GitHub Actions)**: `pio run` für alle Envs plus `pio test -e native` bei jedem Push/PR. Das Firmware-Binary als Release-Artefakt anhängen, damit Nutzer ohne PlatformIO flashen können (z. B. mit ESP Web Tools).
-- [ ] **P3 – 5.5 Lokale Umgebung**: Hier schlug der Flash-Image-Schritt fehl (`ModuleNotFoundError: intelhex` im PlatformIO-esptool), die Quellen kompilieren aber. In der README unter „Build" einen Hinweis zur Fehlerbehebung ergänzen (`pio pkg update` bzw. PlatformIO neu installieren).
+- [-] **P2 – 5.4 CI (GitHub Actions)**: `pio run` für alle Envs plus `pio test -e native` bei jedem Push/PR. Das Firmware-Binary als Release-Artefakt anhängen, damit Nutzer ohne PlatformIO flashen können (z. B. mit ESP Web Tools).
+  **Nicht umgesetzt:** Erweiterung (neue CI-Infrastruktur) – laut Auftrag nur Fehlerbehebung. Die nativen Tests (`pio test -e native`) sind CI-tauglich.
+- [x] **P3 – 5.5 Lokale Umgebung**: Hier schlug der Flash-Image-Schritt fehl (`ModuleNotFoundError: intelhex` im PlatformIO-esptool), die Quellen kompilieren aber. In der README unter „Build" einen Hinweis zur Fehlerbehebung ergänzen (`pio pkg update` bzw. PlatformIO neu installieren).
+  **Erledigt:** README, Abschnitt „Fehlerbehebung": `intelhex` in die PlatformIO-Umgebung installieren. Auf diesem Rechner so behoben.
 
 ---
 
@@ -281,48 +286,63 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   - Nach Sync-Ende per LED die Anzahl der gefundenen Füchse blinken (z. B. n× kurz) und die eigene Fox-ID (n× lang).
   - Countdown in der seriellen Ausgabe („Start in 45 s, 3 Füchse gefunden").
   - Startphase vorzeitig beenden, sobald alle erwarteten Füchse gefunden und stabil sind.
+  **Teilweise erledigt:** Der Sendebeginn ist jetzt fest und vorhersagbar (120 s nach dem Einschalten des ersten Fuchses). Er erscheint im Log beim Einfrieren („Slotplan fest – Sendebeginn in x s") und in Menüpunkt 6 mit Restzeit; Menüpunkt 10 am Master zieht ihn vor. **Nicht umgesetzt (Erweiterungen):** LED-Rückmeldung der gefundenen Füchse/eigenen Fox-ID und vorzeitiges Ende der Startphase, sobald alle erwarteten Füchse da sind.
 - [x] **P1 – 6.2 Nach Konfigurationsänderung Neustart anbieten bzw. erzwingen**
   Nach Änderung von Fox-ID, Profil oder Rufzeichen: „Änderung gespeichert – Neustart erforderlich, jetzt neu starten? (J/N)". Mindestens Menüpunkt 10 sperren, bis neu gestartet wurde. Behebt 2.1 und 3.3.
   **Erledigt:** Nach dem Speichern von Fox-ID, Profil, Rufzeichen oder Werkseinstellungen fragt die CLI „Jetzt neu starten? (J/N)". Ohne Neustart ist Menüpunkt 10 gesperrt, und beim Auto-Timeout wird neu gestartet statt mit veraltetem Zustand zu senden.
-- [ ] **P2 – 6.3 Konfiguration ohne Laptop**
+- [-] **P2 – 6.3 Konfiguration ohne Laptop**
   Derzeit geht das nur per USB-Seriell. Optionen:
   - BOOT-Taste (GPIO9) nach dem Start: kurz drücken = Fox-ID weiterschalten, lang = Profil; Rückmeldung per LED.
   - **Web-Serial-Konfigurationsseite** (statisches HTML, Chrome/Edge): ein Klick auf „Verbinden" und die Konfiguration per Formular. Dafür braucht es ein maschinenlesbares Kommando-Interface (6.5).
   - Konfiguration aller Füchse auf einmal: Ein Fuchs schickt seine Profil/WPM-Einstellung per ESP-NOW an alle, nur die Fox-ID bleibt individuell.
-- [ ] **P2 – 6.4 LED im Sendebetrieb abschaltbar machen**
+  **Nicht umgesetzt:** Erweiterung (BOOT-Taste, Web-Serial-Seite, Konfiguration per ESP-NOW) – laut Auftrag nur Fehlerbehebung.
+- [-] **P2 – 6.4 LED im Sendebetrieb abschaltbar machen**
   Eine im Ton-Takt blinkende LED verrät einen versteckten Fuchs und kostet Strom. Option „LED: aus / nur Startphase / immer".
-- [ ] **P2 – 6.5 Skriptbare Befehle zusätzlich zum Nummernmenü**
+  **Nicht umgesetzt:** Erweiterung (neue Option) – laut Auftrag nur Fehlerbehebung.
+- [-] **P2 – 6.5 Skriptbare Befehle zusätzlich zum Nummernmenü**
   Z. B. `fox 3`, `profil c`, `call DL1ABC`, `status`, `start`, `reboot`, optional `status json`. Erleichtert die Bedienung, automatisierte Tests und eine Web-UI. Die Menünummern 10/11 sind fehleranfällig (Tippfehler „1" + Enter statt „10").
+  **Nicht umgesetzt:** Erweiterung (zusätzliche Befehlssyntax) – laut Auftrag nur Fehlerbehebung.
 - [x] **P2 – 6.6 Im Fehlerzustand die CLI öffnen**
   Statt SOS-Blinken plus Neustart sollte die CLI in den Fehlerzuständen erreichbar bleiben. Die Meldung „Fox-Nummer über CLI ändern" ist sonst nicht umsetzbar (siehe 3.2).
   **Erledigt:** Im Fehlerzustand startet die CLI im Modus `Error`: Menü, Konfiguration ändern, Neustart (11); Menüpunkt 10 erklärt, warum er gesperrt ist.
-- [ ] **P2 – 6.7 Testaussendung**
+- [-] **P2 – 6.7 Testaussendung**
   `docs/cli.md` schließt einen Testmodus ausdrücklich aus. Für den Aufbau im Gelände ist eine einzelne, duty-konforme Testaussendung („T) Kennung einmal senden") aber sehr hilfreich, ebenso eine Option „Peilempfänger-Check".
+  **Nicht umgesetzt:** Erweiterung (neuer Testmodus) – laut Auftrag nur Fehlerbehebung.
 - [x] **P3 – 6.8 Untermenü-Timeouts** (10 s) sind knapp. Eine Zeitüberschreitung sollte mit „Abgebrochen, Wert unverändert" klar gemeldet werden.
   **Erledigt:** Rückfragen haben 30 s Zeit (`CLI_PROMPT_TIMEOUT_MS`); bei Zeitüberschreitung oder ungültiger Eingabe meldet die CLI „abgebrochen, Wert unverändert".
 - [x] **P3 – 6.9 Profil D: Hinweis auf den Reset**
   Wegen des 2,2-s-Deep-Sleep ist die CLI nur nach dem Drücken der RST-Taste erreichbar. In der CLI-Startmeldung und in der README sichtbar erwähnen.
   **Erledigt:** Die CLI-Startmeldung in Profil D weist darauf hin, dass die CLI im Betrieb nur nach Reset (RST) erreichbar ist.
-- [ ] **P3 – 6.10 Sonderzeichen in der Ausgabe** (`–`, `…`, `µ`, Umlaute)
+- [x] **P3 – 6.10 Sonderzeichen in der Ausgabe** (`–`, `…`, `µ`, Umlaute)
   Manche Terminals (PuTTY mit Standard-Codepage, Arduino Serial Monitor älterer Versionen) zeigen sie falsch an. Entweder auf ASCII beschränken oder UTF-8 als Voraussetzung dokumentieren.
+  **Erledigt:** UTF-8 als Voraussetzung in README und `docs/cli.md` dokumentiert; die CLI ignoriert nicht druckbare Eingabezeichen.
 
 ---
 
 ## 7. Dokumentation
 
-- [ ] **P2 – 7.1 README: Plattformaussage falsch** ([README.md:325-328](../README.md#L325-L328))
+- [x] **P2 – 7.1 README: Plattformaussage falsch** ([README.md:325-328](../README.md#L325-L328))
   `espressif32 @ ^6.8.0` liefert Arduino-Core **2.0.17**, nicht ≥ 3.0 (siehe Build-Ausgabe `framework-arduinoespressif32 @ 3.20017…`).
-- [ ] **P2 – 7.2 README: Aussage zu Lolin C3 Mini / USB prüfen** ([README.md:228-231](../README.md#L228-L231), `docs/cli.md`)
+  **Erledigt:** Siehe 4.10.
+- [x] **P2 – 7.2 README: Aussage zu Lolin C3 Mini / USB prüfen** ([README.md:228-231](../README.md#L228-L231), `docs/cli.md`)
   Nach meinem Kenntnisstand nutzt auch der Lolin C3 Mini natives USB (kein CH340). Zudem hat der Lolin C3 Mini (je nach Revision) auf GPIO7 ggf. eine RGB-LED (WS2812) statt einer einfachen LED, *prüfen*.
-- [ ] **P2 – 7.3 README: LED-Tabelle** entspricht nicht der Implementierung (siehe 3.5).
-- [ ] **P2 – 7.4 Zahlen konsistent machen**
+  **Erledigt:** README und `docs/cli.md`: Beide Boards nutzen den nativen USB-Serial/JTAG (kein CH340). Hinweis ergänzt, dass beim Lolin C3 Mini je nach Revision an GPIO7 eine RGB-LED sitzt (am eigenen Board prüfen).
+- [x] **P2 – 7.3 README: LED-Tabelle** entspricht nicht der Implementierung (siehe 3.5).
+  **Erledigt:** LED-Tabelle entspricht der Implementierung (`led.cpp`), inkl. „nicht im Slotplan" und Duty-Guard-Blockade.
+- [x] **P2 – 7.4 Zahlen konsistent machen**
   Die Zyklus- und Duty-Tabellen in README, `docs/duty_cycle.md` (Profil C, 1 Fuchs: 18.500 ms vs. 14.200 ms) und die CLI-Ausgabe weichen voneinander ab (Ursache 2.3). Idealerweise erzeugt ein Skript oder Test die Tabellen aus dem Code.
-- [ ] **P2 – 7.5 `docs/sync_protocol.md` / `docs/time_sync.md`** an das tatsächliche (bzw. neue) Verhalten anpassen: Config-Hash ohne Fox-ID, kein Re-Sync, RTC-Uhr vs. Quarz, tatsächliche Rolle des Masters.
-- [ ] **P3 – 7.6 Fehlende Datei `NOTICE`**: Sie wird in README und Lizenzhinweis referenziert, existiert aber nicht.
+  **Erledigt:** Alle Tabellen in README und `docs/duty_cycle.md` aus dem Produktionscode erzeugt (Hilfsprogramm gegen `schedule.cpp`/`fox_profile.cpp`): Budgets je Fuchs, Zyklen für 1–5 Füchse, AFU-Beispiel, Profil D.
+- [x] **P2 – 7.5 `docs/sync_protocol.md` / `docs/time_sync.md`** an das tatsächliche (bzw. neue) Verhalten anpassen: Config-Hash ohne Fox-ID, kein Re-Sync, RTC-Uhr vs. Quarz, tatsächliche Rolle des Masters.
+  **Erledigt:** `docs/sync_protocol.md` und `docs/time_sync.md` neu: Protokoll v3, Hash ohne Fox-ID, Zuhörphase, Master-Wahl, Vererbung des Sendebeginns, Einfrieren, Nachzügler, Queue-Verarbeitung, Zeitmodell gegen den Master, Begründung für den Wach-Betrieb (Quarz vs. RC), Genauigkeit laut Simulation. `docs/cli.md` an die neue CLI angepasst.
+- [x] **P3 – 7.6 Fehlende Datei `NOTICE`**: Sie wird in README und Lizenzhinweis referenziert, existiert aber nicht.
+  **Erledigt:** Verweise auf `NOTICE` entfernt (README); die Lizenzangaben stehen in `LICENSE` und `AUTHORS.md`.
 - [ ] **P3 – 7.7 Tippfehler/Artefakte**
   „Einsätzrn" (`docs/time_sync.md`); doppelte Leerzeichen und Kommas in Namen („Harm  , DK4HAA", „Sebastian , DM8SB") in allen Datei-Headern, README und `AUTHORS.md`; Aufzählung in `AUTHORS.md` mit leeren Einträgen („, CLI", „Tests, ").
+  **Teilweise erledigt:** Tippfehler („Einsätzrn") mit der Neufassung von `time_sync.md` entfallen, leere Aufzählungen in `AUTHORS.md` bereinigt. **Offen:** Die Namen „Harm  , DK4HAA" / „Sebastian , DM8SB" in Copyright-Zeilen, README und AUTHORS.md sind unverändert – die Kürzung wirkt beabsichtigt; bitte selbst entscheiden.
 - [ ] **P3 – 7.8 Hardware-Doku ergänzen**: Stromaufnahme (Sync, TX, Deep-Sleep), Akkulaufzeit, Antenne/Yagi-Hinweis (Gerber liegt im Repo-Root unter `ant/`), Schaltplan bzw. Verweis auf `tx/`.
-- [ ] **P3 – 7.9 Root-README** (`../README.md`) ist nur ein Zweizeiler. Sie sollte auf `tx-Software/`, `tx/` (Original-Sketch, Gerber, Gehäuse) und `ant/` verlinken.
+  **Teilweise erledigt:** README: Abschnitt „Stromverbrauch" (Wach-Betrieb der Profile A–C vs. Deep-Sleep in Profil D). **Offen:** gemessene Werte, Akkulaufzeit, Antennen-/Schaltplanverweise (Messung/Erweiterung).
+- [-] **P3 – 7.9 Root-README** (`../README.md`) ist nur ein Zweizeiler. Sie sollte auf `tx-Software/`, `tx/` (Original-Sketch, Gerber, Gehäuse) und `ant/` verlinken.
+  **Nicht umgesetzt:** Erweiterung außerhalb von `tx-Software` – laut Auftrag nur Fehlerbehebung.
 
 ---
 

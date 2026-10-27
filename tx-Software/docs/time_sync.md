@@ -1,125 +1,106 @@
-# Zeitdrift-Kompensation und Zeitsynchronisation
+# Zeitsynchronisation
 
 ## Übersicht
 
-Die Zeitsynchronisation stellt sicher, dass alle ARDF-Sender im Verbund trotz unvermeidlicher
-Taktdrift der internen Oszillatoren dauerhaft synchron bleiben. Die Kompensation basiert auf
-einer linearen Regression der gemessenen Clock-Offsets.
+Alle Füchse eines Verbunds senden in einem gemeinsamen Slotraster. Dafür muss jeder Slave
+wissen, wie seine Uhr zur Uhr des Masters steht. Das Zeitmodell (`TimeModel` in
+`src/time_sync.cpp`) schätzt daraus Offset und Taktabweichung. Danach rechnet es jeden
+Sendezeitpunkt aus der Master-Uhr in die lokale Uhr um.
 
-## Messalgorithmus
+## Warum die Füchse im Betrieb wach bleiben
 
-### Datensammlung
+Der ESP32-C3 hat zwei Zeitbasen:
 
-1. Während des Sync-Fensters (120–180 s) werden ESP-NOW-Beacons empfangen
-2. Jeder Beacon enthält die `uptime_us` des Senders (Mikrosekunden seit Boot)
-3. Der Empfänger misst den lokalen Empfangszeitpunkt `rx_local_us`
-4. Offset: `offset_us = rx_local_us - uptime_us`
-5. Maximal 120 Messwerte werden in einem Ringpuffer gespeichert
+| Zeitbasis                  | Takt                        | Genauigkeit              |
+|----------------------------|-----------------------------|--------------------------|
+| `esp_timer` (SYSTIMER)     | 40-MHz-Quarz                | typ. ±10…40 ppm          |
+| Deep-Sleep-/RTC-Timer      | interner RC-Oszillator      | deutlich schlechter, temperaturabhängig |
+
+Im Deep-Sleep läuft nur der RC-Oszillator. Seine Abweichung kann in einem 20-s-Zyklus
+mehrere zehn Millisekunden ausmachen und ändert sich mit der Temperatur; ein
+gemeinsames Raster wäre nach kurzer Zeit verloren.
+
+Deshalb bleiben die Füchse in den Profilen A–C nach der Sync-Phase **wach** (WiFi aus,
+CPU 80 MHz). Alle Zeiten laufen über den Quarz, und die gemessene Taktabweichung wirkt
+auf dieselbe Uhr, die auch das Timing bestimmt. Profil D braucht kein gemeinsames Raster
+und schläft weiterhin.
+
+Kosten: ein Ruhestrom von einigen mA statt µA (auf der eigenen Hardware messen).
+
+## Messverfahren
+
+1. Der Master sendet Beacons mit seinem Sendezeitpunkt `uptime_us` (Master-Uhr)
+2. Der Slave nimmt im Empfangs-Callback den lokalen Zeitstempel `rx_local_us`
+3. Ein Messpunkt ist das Paar (Master-Zeit, lokale Zeit); gemessen wird **nur gegen den
+   aktuellen Master**
+4. Ringpuffer mit 256 Messpunkten (bei 2 Beacons/s etwa das ganze Sync-Fenster)
+5. Bei einem Masterwechsel oder Neustart des Masters (`boot_id`) beginnt die Messung neu
+
+## Modell
+
+```
+lokal = ref + a + b · (ref − x0)
+```
+
+- `ref` = Zeitpunkt in der Master-Uhr
+- `a` = Offset in µs (enthält auch die mittlere Funklatenz)
+- `b` = Taktabweichung (dimensionslos; `b × 10⁶` = ppm)
+- `x0` = Bezugspunkt (ältester Messpunkt)
 
 ### Ausreißer-Filterung (Median / MAD)
 
-1. Median aller Offset-Werte berechnen
-2. MAD (Median Absolute Deviation) berechnen:
-   `MAD = median(|offset_i - median|)`
-3. Ausreißer: Werte mit `|offset - median| > 3 × MAD` werden verworfen
-4. Die MAD-basierte Filterung ist robuster als Standardabweichung gegen einzelne Ausreißer
+1. Offset je Messpunkt: `lokal − ref`
+2. Median aller Offsets
+3. MAD = Median der Abweichungen vom Median
+4. Verworfen werden Punkte mit Abweichung > max(3 × MAD, 500 µs)
 
 ### Lineare Regression
 
-Mindestens 30 Messpunkte sind für eine valide Regression erforderlich.
+- Kleinste Quadrate über die verbleibenden Punkte
+- Mindestens 30 Punkte, sonst nur Offset (Median), keine Taktabweichung
+- Plausibilität: |b| < 100 ppm (zwei Quarze weichen zusammen deutlich weniger ab);
+  sonst nur Offset
 
-Modell: `offset(t) = a + b × t`
+### Qualität
 
-- `t` = lokale Zeit relativ zum ersten Messwert
-- `a` = initialer Offset (Achsenabschnitt)
-- `b` = Drift-Rate (Steigung)
-- `drift_ppm = b × 10⁶`
+- 0–59: zu wenige Punkte für eine Drift-Schätzung
+- 60–100: Anteil der verwendeten Punkte
+- 10/20: Steigung unplausibel bzw. Regression numerisch nicht lösbar
 
-Berechnung über die Methode der kleinsten Quadrate (OLS):
-```
-b = (n·Σ(x·y) - Σx·Σy) / (n·Σ(x²) - (Σx)²)
-a = (Σy - b·Σx) / n
-```
+## Genauigkeit
 
-### Qualitätsbewertung
+Die Verbund-Simulation (`test/test_sync`) mit 5 Füchsen, Quarzen zwischen −30 und
++35 ppm und Funklatenz-Jitter ergibt:
 
-- 0–59: Nicht genügend Daten für Regression
-- 60–100: Gültige Schätzung, basierend auf dem Verhältnis gültiger zu gesamten Messwerten
-- Werte ≥ 60 werden als vertrauenswürdig eingestuft
+| Zeitpunkt        | Abweichung vom gemeinsamen Raster |
+|------------------|-----------------------------------|
+| Sendebeginn      | < 1 ms                            |
+| nach 3 Stunden   | ≤ 2 ms (≤ 9 ms nach einem Masterwechsel mit nur 60 s Messdauer) |
+
+Der Schutzabstand zwischen dem Ende der längsten Aussendung und dem nächsten Slot beträgt
+mindestens 250 ms.
+
+## Laufzeit
+
+- Es gibt keinen Wakeup-Vorlauf mehr: Der Fuchs wartet mit `delay()` und in den letzten
+  2–3 ms aktiv bis zum exakten Slotbeginn
+- Ein verpasster Slot (sollte nicht vorkommen) wird übersprungen, nie verspätet gesendet
+- Kein erneuter Abgleich während des Betriebs: Die Füchse brauchen nach dem Start keinen
+  Funkkontakt
 
 ## NVS-Persistenz
 
-### Gespeicherte Werte
-
-```cpp
-struct TimeCorrectionData {
-    int16_t  drift_ppm;    // Geschätzte Drift in ppm
-    int64_t  offset_us;    // Letzter Offset in µs
-    uint8_t  quality;      // Qualitätsfaktor 0..100
-    uint16_t meas_count;   // Anzahl Messungen
-    uint32_t crc32;        // CRC32-Prüfsumme
-};
-```
-
-### Ladekriterien
-
-NVS-Werte werden als Initialwerte genutzt, wenn:
-- |drift_ppm| < 500 ppm
-- Qualität ≥ 60
-
-### Speicherzeitpunkt
-
-Nach erfolgreichem Abschluss der Sync-Phase (Regression berechnet, Qualität ausreichend).
-
-### Löschen
-
-Über CLI-Menüpunkt 8 oder als Teil der Werkseinstellungen (Menüpunkt 9).
-
-## Vorlaufberechnung
-
-Der Wakeup-Vorlauf stellt sicher, dass der Sender rechtzeitig vor seinem Slot aus dem
-Deep-Sleep aufwacht. Er kompensiert die akkumulierte Drift seit dem letzten Sync.
-
-### Formel
-
-```
-vorlauf_us = 80.000 + |drift_ppm| × elapsed_s + 20.000
-```
-
-Dabei ist:
-- `80.000 µs` = Basis-Vorlauf (80 ms, für Bootzeit und Initialisierung)
-- `|drift_ppm| × elapsed_s` = driftabhängiger Anteil (wächst mit der Zeit)
-- `20.000 µs` = Sicherheitszuschlag (20 ms)
-- `elapsed_s` = Sekunden seit dem letzten Sync-Offset-Update (oder seit Boot, falls kein Sync)
-
-### Grenzen
-
-- Minimum: 100.000 µs (100 ms)
-- Maximum: 350.000 µs (350 ms)
-
-### Drift-Kompensation im Deep-Sleep
-
-Die Sleep-Zeit wird um den geschätzten Drift-Anteil korrigiert:
-
-```
-sleep_us_korrigiert = sleep_us × (1 - drift_ppm / 10⁶)
-```
-
-## Empfehlung für längere Einsätze
-
-Bei längeren Einsätzrn kann die Zeit trotzdem auseinanderlaufen.
-
-### Warum?
-
-- Kristalloszillatoren driften temperaturabhängig
-- Akkumulierte Fehler können bei langen Einsätzen die Slot-Grenzen überschreiten
-- Die gespeicherten NVS-Driftdaten dienen beim Neustart als Initialwerte
+Die letzte Messung (Offset, Drift, Qualität, Anzahl) wird nach der Sync-Phase im NVS
+gespeichert (Namespace `timecorr`, Key `tc_v2`) und in Menüpunkt 7 angezeigt. Sie wird
+**nicht** als Startwert verwendet: Die Taktabweichung gilt relativ zum jeweiligen Master
+und wird bei jedem Einsatz neu gemessen. Löschen über Menüpunkt 8 oder 9.
 
 ## Zusammenspiel mit dem Sync-Protokoll
 
-1. **Boot:** NVS-Driftdaten laden (falls vorhanden und plausibel)
-2. **Sync-Phase:** ESP-NOW-Beacons empfangen, Offsets messen
-3. **Regression:** Nach ≥ 30 Messpunkten lineare Drift berechnen
-4. **Speichern:** Ergebnisse im NVS ablegen
-5. **Normalbetrieb:** Deep-Sleep-Timer mit Drift korrigiert
-6. **Kein Re-Sync:** Nach dem Initialfenster findet kein erneuter Sync statt
+1. **Sync-Phase:** Beacons empfangen, gegen den Master messen (siehe
+   [`sync_protocol.md`](sync_protocol.md))
+2. **Modell:** sofort nach den ersten Messpunkten, danach höchstens 1× pro Sekunde neu
+   geschätzt
+3. **Ende:** 1 s vor Sendebeginn – letzte Messung im NVS ablegen, WiFi aus
+4. **Normalbetrieb:** Sendezeitpunkt `k` = Planstart + k × Zyklus + Slot-Index × Slot,
+   über das Modell in lokale Zeit umgerechnet

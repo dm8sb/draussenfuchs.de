@@ -9,9 +9,9 @@
 ## Weiterentwicklung
 
 - Sebastian , DM8SB (ab 2026)
-  –  PlatformIO / ESP32-C3
-  – ARDF-Profile, ESP-NOW-Sync, , CLI, NVS, Zeitkorrektur
-  – Dokumentation, Tests, 
+  – PlatformIO / ESP32-C3
+  – ARDF-Profile, ESP-NOW-Sync, CLI, NVS, Zeitkorrektur
+  – Dokumentation, Tests
 
 ## Mitwirkung
 
