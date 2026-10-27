@@ -36,7 +36,7 @@ constexpr uint8_t  DEFAULT_FOX_CYCLE_PROFILE = 2;  // Profil C (ISM-Ultra)
 constexpr uint8_t  CALLSIGN_MAX_LEN         = 12;
 
 // ---- Sync-Protokoll ----
-constexpr uint8_t  SYNC_PROTOCOL_VERSION    = 2;
+constexpr uint8_t  SYNC_PROTOCOL_VERSION    = 3;
 constexpr uint16_t BEACON_INTERVAL_MS       = 500;  // ± 50 ms Jitter
 constexpr uint8_t  BEACON_JITTER_MS         = 50;
 constexpr uint32_t SYNC_WINDOW_NOMINAL_MS   = 120000;  // 120 s (Profile A–C)
@@ -133,10 +133,11 @@ constexpr uint8_t FLAG_DUTY_GUARD     = (1 << 1);  // Bit 1: Duty-Guard aktiv
 constexpr uint8_t FLAG_MASTER         = (1 << 2);  // Bit 2: Master-Rolle
 
 // ---- Config-Hash Eingabe-Struct ----
+// Nur verbundweite Parameter – keine Fox-ID, sonst wären Füchse mit
+// unterschiedlicher Nummer nie kompatibel.
 struct __attribute__((packed)) ConfigHashInput {
-    uint8_t  protocol_cfg_ver;    // = 2
+    uint8_t  protocol_cfg_ver;    // = SYNC_PROTOCOL_VERSION
     uint8_t  profile_id;
-    uint8_t  fox_id;
     uint16_t slot_duration_ms;
     uint8_t  wpm;
     uint8_t  callsign_empty;      // 1 wenn leer, sonst 0

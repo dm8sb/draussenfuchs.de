@@ -26,8 +26,8 @@ bool saveConfig(const ConfigV2& cfg);
 // Konfiguration auf Werkseinstellungen zurücksetzen
 void resetToDefaults(ConfigV2& cfg);
 
-// Config-Hash berechnen (CRC32 über ConfigHashInput)
-uint32_t calculateConfigHash(uint8_t profile_id, uint8_t fox_id,
+// Config-Hash berechnen (CRC32 über ConfigHashInput, verbundweite Parameter)
+uint32_t calculateConfigHash(uint8_t profile_id,
                               uint16_t slot_ms, uint8_t wpm,
                               bool callsign_empty, uint8_t morse_repeats);
 

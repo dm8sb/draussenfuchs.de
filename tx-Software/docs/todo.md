@@ -41,10 +41,11 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ## 1. Kritische Funktionsfehler (Sync / Timing)
 
-- [ ] **P0 – 1.1 Config-Hash enthält die Fox-ID → alle Füchse sind gegenseitig „inkompatibel"**
+- [x] **P0 – 1.1 Config-Hash enthält die Fox-ID → alle Füchse sind gegenseitig „inkompatibel"**
   [config_store.cpp:145-157](../src/config_store.cpp#L145-L157), [sync_espnow.cpp:83-87](../src/sync_espnow.cpp#L83-L87), [sync_espnow.cpp:200-202](../src/sync_espnow.cpp#L200-L202)
   `calculateConfigHash(profile, fox_id, …)` wird mit der *eigenen* Fox-ID berechnet und mit dem Hash des Peers (der *dessen* Fox-ID enthält) verglichen. Fox 1 und Fox 2 haben damit immer verschiedene Hashes → `config_mismatch = true` → `ERR_CONFIG_MISMATCH` → kein Fuchs sendet. Kompatibel sind nur Füchse mit gleicher ID, und die lösen dann eine Kollision aus.
   **Fix:** Die Fox-ID aus `ConfigHashInput` entfernen. Der Hash darf nur verbundweite Parameter enthalten (Profil, WPM, Repeats, Slot, AFU-Flag, Protokollversion). Danach `SYNC_PROTOCOL_VERSION` erhöhen und `docs/sync_protocol.md` anpassen.
+  **Erledigt:** Fox-ID aus `ConfigHashInput` und `calculateConfigHash()` entfernt; der Hash umfasst nur noch Protokollversion, Profil, Slot, WPM, Wiederholungen und AFU-Flag. `SYNC_PROTOCOL_VERSION` = 3 (alte Firmware wird ignoriert, alle Füchse müssen aktualisiert werden). Abgedeckt durch [test_config.cpp](../test/test_config/test_config.cpp).
 
 - [ ] **P0 – 1.2 Eigener Slot-Index und Zyklusstart werden im Sendebetrieb nie benutzt**
   [main.cpp:173-201](../src/main.cpp#L173-L201), [main.cpp:315-353](../src/main.cpp#L315-L353)

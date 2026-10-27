@@ -81,7 +81,7 @@ static void onReceive(const uint8_t* mac_addr,
     // Config-Hash für Kompatibilitätsprüfung berechnen
     const FoxProfile& prof = getProfile(own_profile_id);
     uint32_t own_hash = config::calculateConfigHash(
-        own_profile_id, own_fox_id, prof.slot_ms, prof.wpm,
+        own_profile_id, prof.slot_ms, prof.wpm,
         (own_callsign[0] == '\0'), prof.morse_repeats);
 
     bool compatible = (beacon.config_hash == own_hash);
@@ -198,7 +198,7 @@ static void updateSyncState() {
 
     // Config-Hash berechnen
     sync_state.config_hash = config::calculateConfigHash(
-        own_profile_id, own_fox_id, prof.slot_ms, prof.wpm,
+        own_profile_id, prof.slot_ms, prof.wpm,
         (own_callsign[0] == '\0'), prof.morse_repeats);
 }
 

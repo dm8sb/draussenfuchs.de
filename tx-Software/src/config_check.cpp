@@ -99,13 +99,12 @@ bool isValidConfig(const ConfigV2& cfg) {
     return true;
 }
 
-uint32_t calculateConfigHash(uint8_t profile_id, uint8_t fox_id,
+uint32_t calculateConfigHash(uint8_t profile_id,
                               uint16_t slot_ms, uint8_t wpm,
                               bool callsign_empty, uint8_t morse_repeats) {
     ConfigHashInput input;
     input.protocol_cfg_ver = SYNC_PROTOCOL_VERSION;
     input.profile_id       = profile_id;
-    input.fox_id           = fox_id;
     input.slot_duration_ms = slot_ms;
     input.wpm              = wpm;
     input.callsign_empty   = callsign_empty ? 1 : 0;
