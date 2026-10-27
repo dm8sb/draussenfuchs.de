@@ -18,6 +18,7 @@
 #include "time_sync.h"
 #include "cli.h"
 #include <esp_sleep.h>
+#include <driver/gpio.h>
 
 // ---- Globale Konfiguration ----
 ConfigV2 g_config;
@@ -50,7 +51,7 @@ static void runStartupPhase();
 static void runNormalMode();
 static void enterDeepSleep(uint64_t sleep_us);
 static void handleError(ErrorState error);
-static uint64_t calculateNextSlotUs();
+static uint64_t calculateNextSlotUs(uint32_t cycle_ms);
 
 void setup() {
     // Hardware initialisieren
@@ -124,6 +125,12 @@ static void runStartupPhase() {
         // CLI-Timeout prüfen
         if (ardf::cli::isTimedOut()) {
             Serial.println();
+            if (ardf::cli::restartRequired()) {
+                // Geänderte Konfiguration nie mit veraltetem Sync-Zustand senden
+                Serial.println(LOG_CLI "Inaktivitäts-Timeout – Konfiguration geändert, Neustart");
+                delay(500);
+                esp_restart();
+            }
             Serial.println(LOG_CLI "Inaktivitäts-Timeout – Normalbetrieb wird gestartet");
             g_start_normal_mode = true;
             break;
@@ -186,9 +193,7 @@ static void runStartupPhase() {
     ardf::sync::deinitSync();
 
     // Duty-Guard prüfen und loggen
-    uint32_t tx_on_ms = ardf::calculateTxOnTimeMs(
-        g_config.profile_id, g_config.fox_id,
-        false, 0);
+    uint32_t tx_on_ms = ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
     ardf::duty::GuardCheck gc = ardf::duty::checkDuty(
         g_config.profile_id, g_config.fox_id,
         rtc_active_count, tx_on_ms, false);
@@ -210,6 +215,11 @@ static void runNormalMode() {
 
     // ---- Profil D: Einfacher Solo-Modus ----
     if (prof.is_continuous) {
+        // Pausenzeit aus dem Duty-Guard (mindestens tone_off_ms)
+        uint32_t tx_ms = ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
+        ardf::duty::GuardCheck gc = ardf::duty::checkDuty(
+            g_config.profile_id, g_config.fox_id, 1, tx_ms, false);
+
         // TX-Sequenz: Dauerton
         ardf::tx::power(true);
         delay(TX_WARMUP_MS);
@@ -219,7 +229,7 @@ static void runNormalMode() {
         ardf::tx::power(false);
 
         // Deep-Sleep für die Pausenzeit
-        enterDeepSleep((uint64_t)prof.tone_off_ms * 1000ULL);
+        enterDeepSleep((uint64_t)(gc.effective_cycle_ms - tx_ms) * 1000ULL);
         return;
     }
 
@@ -236,21 +246,10 @@ static void runNormalMode() {
         }
     }
 
-    // TX-Zeit berechnen
-    uint32_t tx_on_ms;
-    if (send_callsign) {
-        // MO-Kennung + Pause + Callsign
-        uint32_t mo_dur = ardf::morse::calculateMoSequenceDurationMs(
-            g_config.fox_id, prof.wpm, prof.morse_repeats);
-        uint16_t dit_ms = ardf::morse::ditDurationMs(prof.wpm);
-        uint32_t cs_dur = ardf::morse::calculateSequenceDurationMs(
-            g_config.callsign, prof.wpm);
-        tx_on_ms = mo_dur + 7 * dit_ms + cs_dur + TX_WARMUP_MS;
-    } else {
-        uint32_t mo_dur = ardf::morse::calculateMoSequenceDurationMs(
-            g_config.fox_id, prof.wpm, prof.morse_repeats);
-        tx_on_ms = mo_dur + TX_WARMUP_MS;
-    }
+    // TX-Zeit berechnen (MO-Kennung, ggf. + Pause + Rufzeichen)
+    uint32_t tx_on_ms = ardf::txBudgetMs(
+        g_config.profile_id, g_config.fox_id,
+        send_callsign ? g_config.callsign : nullptr);
 
     // Duty-Guard-Prüfung
     ardf::duty::GuardCheck gc = ardf::duty::checkDuty(
@@ -269,7 +268,7 @@ static void runNormalMode() {
         rtc_error_start_us = esp_timer_get_time();
 
         // Nächsten Slot berechnen und schlafen
-        uint64_t sleep_us = calculateNextSlotUs();
+        uint64_t sleep_us = calculateNextSlotUs(gc.effective_cycle_ms);
         enterDeepSleep(sleep_us);
         return;
     }
@@ -305,26 +304,20 @@ static void runNormalMode() {
     rtc_error_state = ERR_NONE;
 
     // Nächsten Slot berechnen und Deep-Sleep
-    uint64_t sleep_us = calculateNextSlotUs();
+    // Der Zyklus kommt aus dem Duty-Guard dieser Aussendung, nicht aus dem
+    // Sync-Zustand – so bleibt die Pause auch bei abweichendem Profil ISM-sicher.
+    uint64_t sleep_us = calculateNextSlotUs(gc.effective_cycle_ms);
     enterDeepSleep(sleep_us);
 }
 
 // ============================================================================
 // Nächsten eigenen Slot berechnen
 // ============================================================================
-static uint64_t calculateNextSlotUs() {
+static uint64_t calculateNextSlotUs(uint32_t cycle_ms) {
     uint64_t now_us = esp_timer_get_time();
 
-    const ardf::FoxProfile& prof = ardf::getProfile(g_config.profile_id);
-
-    if (prof.is_continuous) {
-        // Profil D: feste Pausenzeit
-        return (uint64_t)prof.tone_off_ms * 1000ULL;
-    }
-
     // Nächster eigener Slot im Zyklus
-    uint64_t cycle_us = (uint64_t)rtc_effective_cycle_ms * 1000ULL;
-    uint64_t slot_us  = (uint64_t)rtc_effective_slot_ms * 1000ULL;
+    uint64_t cycle_us = (uint64_t)cycle_ms * 1000ULL;
 
     // Vorlaufzeit berechnen
     uint32_t elapsed_s = 0;
@@ -366,6 +359,15 @@ static void enterDeepSleep(uint64_t sleep_us) {
 #else
     ledcDetachPin(DATA_PIN);
 #endif
+
+    // TX-Versorgung und Datenpin im Deep-Sleep auf LOW halten – sonst floaten
+    // die Pins und das Modul kann teilversorgt sein oder ungewollt abstrahlen
+    pinMode(DATA_PIN, OUTPUT);
+    digitalWrite(DATA_PIN, LOW);
+    digitalWrite(TX_VCC_EN_PIN, LOW);
+    gpio_hold_en((gpio_num_t)DATA_PIN);
+    gpio_hold_en((gpio_num_t)TX_VCC_EN_PIN);
+    gpio_deep_sleep_hold_en();
 
     // Minimale Sleep-Zeit: 10 ms
     if (sleep_us < 10000ULL) sleep_us = 10000ULL;

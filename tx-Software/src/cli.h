@@ -33,6 +33,10 @@ bool isTimedOut();
 // Inaktivitäts-Timer zurücksetzen
 void resetIdleTimer();
 
+// Wurde die Konfiguration geändert? Dann muss vor dem Senden neu gestartet werden,
+// weil Sync-Zustand und Startphase noch auf der alten Konfiguration beruhen.
+bool restartRequired();
+
 } // namespace cli
 } // namespace ardf
 

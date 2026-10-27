@@ -32,6 +32,7 @@ static uint64_t last_activity_us = 0;
 static char input_buffer[64];
 static uint8_t input_pos = 0;
 static bool menu_shown = false;
+static bool restart_required = false;
 
 void init() {
     cli_active = true;
@@ -82,6 +83,33 @@ void showMenu() {
 
 // ---- Interne Befehle ----
 
+// Nach einer gespeicherten Änderung: Neustart anbieten. Ohne Neustart bleibt der
+// Normalbetrieb gesperrt, weil Sync und Startphase noch mit der alten Konfiguration laufen.
+static void requireRestart() {
+    restart_required = true;
+    Serial.println(LOG_WARN "Änderung wird erst nach einem Neustart wirksam.");
+    Serial.print("Jetzt neu starten? (J/N): ");
+
+    uint64_t start = esp_timer_get_time();
+    while (!Serial.available()) {
+        if (esp_timer_get_time() - start > 10000000ULL) {
+            Serial.println("\nKein Neustart – bitte später Menüpunkt 11 wählen");
+            return;
+        }
+        yield();
+    }
+    char c = Serial.read();
+    while (Serial.available()) Serial.read();
+    Serial.println(c);
+
+    if (c == 'J' || c == 'j') {
+        Serial.println(LOG_WARN "Neustart wird ausgeführt...");
+        delay(500);
+        esp_restart();
+    }
+    Serial.println("Kein Neustart – Normalbetrieb bis zum Neustart gesperrt (Menüpunkt 11)");
+}
+
 static void cmdShowConfig() {
     Serial.println();
     Serial.println("=== Aktuelle Konfiguration ===");
@@ -123,6 +151,7 @@ static void cmdChangeFoxId() {
         config::saveConfig(g_config);
         Serial.printf(LOG_CFG "Fox-Nummer auf %u geändert (Ton: %u Hz)\n",
                       g_config.fox_id, FOX_TONE_HZ[g_config.fox_id - 1]);
+        requireRestart();
     } else {
         Serial.println(LOG_ERR "Ungültige Fox-Nummer (erlaubt: 1..5)");
     }
@@ -159,6 +188,7 @@ static void cmdChangeProfile() {
         Serial.println(LOG_WARN "Profil D: Solo-Modus ohne ARDF-Synchronisation");
         Serial.println(LOG_WARN "Fox-spezifischer Dauerton, kein ESP-NOW");
     }
+    requireRestart();
 }
 
 static void cmdChangeCallsign() {
@@ -210,6 +240,7 @@ static void cmdChangeCallsign() {
         memset(g_config.callsign, 0, sizeof(g_config.callsign));
         config::saveConfig(g_config);
         Serial.println(LOG_CFG "Rufzeichen gelöscht – ISM-Modus aktiv");
+        requireRestart();
         return;
     }
 
@@ -235,6 +266,7 @@ static void cmdChangeCallsign() {
 
     Serial.printf(LOG_CFG "Rufzeichen gesetzt: %s\n", g_config.callsign);
     Serial.println(LOG_WARN "Rufzeichen nur für AFU-Betrieb verwenden; im ISM-Betrieb leer lassen.");
+    requireRestart();
 }
 
 static void cmdDutyCycle() {
@@ -251,23 +283,24 @@ static void cmdDutyCycle() {
     Serial.printf("WPM:       %u\n", prof.wpm);
     Serial.printf("Wiederh.:  %u\n", prof.morse_repeats);
 
+    uint32_t tx_total = txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
+
     if (prof.is_continuous) {
-        Serial.printf("TX-AN:     %u ms\n", prof.tone_on_ms);
-        Serial.printf("TX-AUS:    %u ms\n", prof.tone_off_ms);
-        Serial.printf("Zyklus:    %lu ms\n", (unsigned long)prof.cycle_ms);
-        float duty = (float)prof.tone_on_ms / (float)prof.cycle_ms * 100.0f;
-        Serial.printf("Duty:      %.2f %%\n", duty);
+        duty::GuardCheck gc = duty::checkDuty(
+            g_config.profile_id, g_config.fox_id, 1, tx_total, false);
+        Serial.printf("TX-AN:     %u ms (+ %u ms Vorlauf)\n", prof.tone_on_ms, TX_WARMUP_MS);
+        Serial.printf("TX-AUS:    %lu ms\n",
+                      (unsigned long)(gc.effective_cycle_ms - tx_total));
+        Serial.printf("Zyklus:    %lu ms\n", (unsigned long)gc.effective_cycle_ms);
+        Serial.printf("Duty:      %.2f %% (inkl. 5 %% Sicherheitsaufschlag)\n", gc.duty_percent);
     } else {
-        // Ton-AN-Zeit berechnen
+        // Ton-AN-Zeit (Information) und Sendezeit-Budget (Grundlage des Duty-Guards)
         uint32_t tone_on = morse::calculateMoToneOnTimeMs(
             g_config.fox_id, prof.wpm, prof.morse_repeats);
-        uint32_t seq_dur = morse::calculateMoSequenceDurationMs(
-            g_config.fox_id, prof.wpm, prof.morse_repeats);
-        uint32_t tx_total = tone_on + TX_WARMUP_MS;
 
         Serial.printf("Ton-AN:    %lu ms\n", (unsigned long)tone_on);
-        Serial.printf("Sequenz:   %lu ms\n", (unsigned long)seq_dur);
-        Serial.printf("TX-Total:  %lu ms (inkl. 20 ms Vorlauf)\n", (unsigned long)tx_total);
+        Serial.printf("TX-Budget: %lu ms (Sequenz inkl. Pausen + 20 ms Vorlauf)\n",
+                      (unsigned long)tx_total);
 
         // Für 1..5 Füchse
         Serial.println();
@@ -387,12 +420,18 @@ static void cmdFactoryReset() {
         config::resetToDefaults(g_config);
         config::saveConfig(g_config);
         Serial.println(LOG_CFG "Werkseinstellungen geladen und gespeichert");
+        requireRestart();
     } else {
         Serial.println("Abgebrochen");
     }
 }
 
 static void cmdStartNormal() {
+    if (restart_required) {
+        Serial.println(LOG_ERR "Konfiguration wurde geändert – erst neu starten (Menüpunkt 11)");
+        return;
+    }
+
     Serial.println();
     Serial.println("=== Normalbetrieb wird gestartet ===");
 
@@ -474,8 +513,7 @@ static void processCommand(const char* cmd) {
     } else if (strcmp(cmd, "9") == 0) {
         cmdFactoryReset();
     } else if (strcmp(cmd, "10") == 0) {
-        cmdStartNormal();
-        return; // CLI wird beendet
+        cmdStartNormal(); // beendet die CLI, außer ein Neustart steht aus
     } else if (strcmp(cmd, "11") == 0) {
         cmdReboot();
     } else if (strcmp(cmd, "h") == 0 || strcmp(cmd, "H") == 0) {
@@ -558,6 +596,10 @@ bool isTimedOut() {
 
 void resetIdleTimer() {
     last_activity_us = esp_timer_get_time();
+}
+
+bool restartRequired() {
+    return restart_required;
 }
 
 } // namespace cli

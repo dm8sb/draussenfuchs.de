@@ -9,6 +9,7 @@
 #include "tx_driver.h"
 #include "config.h"
 #include <Arduino.h>
+#include <driver/gpio.h>
 
 namespace ardf {
 namespace tx {
@@ -29,6 +30,12 @@ void init() {
 
     pinMode(DATA_PIN, OUTPUT);
     digitalWrite(DATA_PIN, LOW);
+
+    // Pin-Hold aus dem Deep-Sleep aufheben (erst nach LOW-Konfiguration,
+    // damit beim Freigeben kein Pegelwechsel entsteht)
+    gpio_hold_dis((gpio_num_t)TX_VCC_EN_PIN);
+    gpio_hold_dis((gpio_num_t)DATA_PIN);
+    gpio_deep_sleep_hold_dis();
 
     // LEDs (active LOW)
     pinMode(LED_PIN_1, OUTPUT);

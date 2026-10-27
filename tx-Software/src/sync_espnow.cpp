@@ -191,7 +191,7 @@ static void updateSyncState() {
 
     // Effektive Zykluszeiten berechnen
     const FoxProfile& prof = getProfile(own_profile_id);
-    uint32_t tx_on_ms = calculateTxOnTimeMs(own_profile_id, own_fox_id, false, 0);
+    uint32_t tx_on_ms = txBudgetMs(own_profile_id, own_fox_id, nullptr);
     sync_state.effective_cycle_ms = duty::calculateEffectiveCycleMs(
         own_profile_id, active, tx_on_ms);
     sync_state.effective_slot_ms = sync_state.effective_cycle_ms / active;

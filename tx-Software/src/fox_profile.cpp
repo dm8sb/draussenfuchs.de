@@ -106,32 +106,25 @@ bool isValidProfileId(uint8_t profile_id) {
     return profile_id < PROFILE_COUNT;
 }
 
-uint32_t calculateTxOnTimeMs(uint8_t profile_id, uint8_t fox_id,
-                              bool with_callsign, uint8_t callsign_len) {
+uint32_t txBudgetMs(uint8_t profile_id, uint8_t fox_id, const char* callsign) {
     const FoxProfile& prof = getProfile(profile_id);
 
     // Profil D: Dauerton
     if (prof.is_continuous) {
-        return prof.tone_on_ms + TX_WARMUP_MS;
+        return TX_WARMUP_MS + prof.tone_on_ms;
     }
 
-    // MO-Kennung Ton-AN-Zeit
-    uint32_t tone_on_ms = morse::calculateMoToneOnTimeMs(
+    // MO-Kennung(en) inkl. Pausen zwischen den Wiederholungen
+    uint32_t seq_ms = morse::calculateMoSequenceDurationMs(
         fox_id, prof.wpm, prof.morse_repeats);
 
-    // Callsign hinzufügen (7 dits Pause + Callsign)
-    if (with_callsign && callsign_len > 0) {
-        const char* cs_ptr = nullptr;
-        // Callsign-Ton-AN-Zeit berechnen
-        // Wir brauchen den eigentlichen String – übergeben als Parameter
-        // Hier nur die Ton-AN-Zeit der MO-Kennung + geschätzter Callsign-Anteil
-        uint16_t dit_ms = morse::ditDurationMs(prof.wpm);
-        // 7 dits Pause (kein Ton, zählt nicht zur AN-Zeit)
-        // Callsign: grobe Schätzung = callsign_len * 4 dits (Durchschnitt)
-        tone_on_ms += callsign_len * 4 * dit_ms;
+    // Rufzeichen-Slot: 7 dits Pause + Rufzeichen
+    if (callsign != nullptr && callsign[0] != '\0') {
+        seq_ms += 7 * morse::ditDurationMs(prof.wpm);
+        seq_ms += morse::calculateSequenceDurationMs(callsign, prof.wpm);
     }
 
-    return tone_on_ms + TX_WARMUP_MS;
+    return TX_WARMUP_MS + seq_ms;
 }
 
 } // namespace ardf

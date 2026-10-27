@@ -26,9 +26,10 @@ uint32_t calculateEffectiveCycleMs(uint8_t profile_id, uint8_t active_count,
                                     uint32_t tx_on_ms) {
     const FoxProfile& prof = getProfile(profile_id);
 
-    // Profil D: fester Zyklus
+    // Profil D: fester Zyklus, mindestens aber der ISM-sichere Mindestzyklus
     if (prof.is_continuous) {
-        return prof.cycle_ms;
+        uint32_t min_cycle_ms = calculateMinCycleMs(tx_on_ms);
+        return (prof.cycle_ms > min_cycle_ms) ? prof.cycle_ms : min_cycle_ms;
     }
 
     if (active_count == 0) active_count = 1;
@@ -58,13 +59,18 @@ GuardCheck checkDuty(uint8_t profile_id, uint8_t fox_id,
 
     const FoxProfile& prof = getProfile(profile_id);
 
-    // Profil D: fester Zyklus, Duty = 200/2400 = 8,33%
+    // Profil D: fester Zyklus, bei Bedarf auf den ISM-sicheren Mindestzyklus verlängert
     if (prof.is_continuous) {
-        result.effective_cycle_ms = prof.cycle_ms;
-        result.effective_slot_ms  = prof.slot_ms;
-        result.duty_percent = ((float)prof.tone_on_ms / (float)prof.cycle_ms) * 100.0f;
-        result.result = GuardResult::OK;
-        result.decision_text = "OK";
+        result.effective_cycle_ms = calculateEffectiveCycleMs(profile_id, 1, tx_on_ms);
+        result.effective_slot_ms  = result.effective_cycle_ms;
+        result.duty_percent = calculateDutyPercent(tx_on_ms, result.effective_cycle_ms);
+        if (result.effective_cycle_ms > prof.cycle_ms) {
+            result.result = GuardResult::VERLAENGERT;
+            result.decision_text = "VERLÄNGERT";
+        } else {
+            result.result = GuardResult::OK;
+            result.decision_text = "OK";
+        }
         return result;
     }
 

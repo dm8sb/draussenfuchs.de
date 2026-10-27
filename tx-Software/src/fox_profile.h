@@ -41,8 +41,10 @@ uint8_t getProfileIdByChar(char c);
 // Profil gültig?
 bool isValidProfileId(uint8_t profile_id);
 
-// Berechne die TX-ON-Zeit für eine gegebene Fox-ID und Profil (inkl. 20 ms Vorlauf)
-uint32_t calculateTxOnTimeMs(uint8_t profile_id, uint8_t fox_id, bool with_callsign, uint8_t callsign_len);
+// Sendezeit-Budget einer Aussendung in ms (zentrale Definition für den Duty-Guard):
+// Zeit, in der das TX-Modul versorgt ist = 20 ms Vorlauf + komplette Sequenz inkl.
+// Pausen. callsign != nullptr (und nicht leer) → Rufzeichen-Slot (MO + 7 dits + Rufzeichen).
+uint32_t txBudgetMs(uint8_t profile_id, uint8_t fox_id, const char* callsign);
 
 } // namespace ardf
 
