@@ -1,25 +1,138 @@
-# Review & TODO – ARDF-Fuchsjagd-Sender ESP32-C3 (tx-Software v2.0.0)
+# Review & TODO – ARDF-Fuchsjagd-Sender ESP32-C3 (tx-Software)
 
-Stand: 2026-10-27 · Umfang: kompletter Quellcode (`src/`, `test/`), `platformio.ini`, README, `docs/`
+**Stand:** 2026-10-27 · Branch `bugfix/review-fixes` · Firmware 2.1.0 (Sync-Protokoll v3)
 
-**Methode:** Ich habe den Code vollständig gelesen, die Firmware gebaut (Quellen kompilieren gegen
-Arduino-Core 2.0.17 / `framework-arduinoespressif32 @ 3.20017`), die CRC-Tabelle gegen eine
-Referenzimplementierung geprüft und die Morse-/Duty-Zeiten für alle Profile und Füchse nachgerechnet.
-**Nicht** gemacht: Tests auf echter Hardware, HF-Messungen, Strommessungen. Befunde, die nur auf
-Hardware sicher zu klären sind, sind als *„prüfen"* markiert.
+Diese Datei hat zwei Teile:
+
+- **Teil A – aktueller Stand:** Ergebnis des zweiten, vollständigen Reviews nach der Bugfix-Runde, offene Befunde und Hardware-Testplan.
+- **Teil B – Archiv:** die Befunde der ersten Review-Runde mit ihrem Erledigungsstand. Die Zeilenangaben dort beziehen sich auf den Stand **vor** der Bugfix-Runde (Commit `6da8696`).
 
 **Prioritäten**
 
 | Prio | Bedeutung |
 |:-----|:----------|
-| **P0** | Kernfunktion kaputt oder Regelverstoß (ISM-Duty) möglich – vor dem nächsten Einsatz beheben |
+| **P0** | Kernfunktion kaputt oder Regelverstoß (ISM-Duty) möglich – vor dem nächsten Einsatz klären |
 | **P1** | Fehler mit spürbarer Auswirkung im Betrieb |
 | **P2** | Qualität, Wartbarkeit, Bedienkomfort |
 | **P3** | Kosmetik, Doku, nice-to-have |
 
 ---
 
-## 0. Gesamtbewertung (Kurzfassung)
+# Teil A – Aktueller Stand
+
+## A.0 Zweiter Review: Methode und Gesamtbewertung
+
+**Methode:**
+- Den gesamten Code (`src/`, `test/`, Doku) habe ich selbst durchgesehen. Zusätzlich hat ein unabhängiger Reviewer ohne Kenntnis meiner Bewertung geprüft und kritische Szenarien mit einer eigenen Simulation gegen den Produktionscode nachgestellt.
+- Alle bestätigten Befunde mit klarer Ursache sind behoben (Commit `5013a50`) und mit Tests abgesichert.
+- Firmware-Build ohne Warnungen (`-Wall -Wextra -Wsign-compare -Wformat`): RAM 14,1 %, Flash 56,1 %.
+- 75 native Tests grün (`pio test -e native_win`), darunter eine Verbund-Simulation mit bis zu 5 Füchsen, Quarzabweichung, Latenz-Jitter, Neustarts und Ausfällen.
+- **Nicht** geprüft: echte Hardware (siehe A.1).
+
+**Gesamtbewertung:**
+- Die Kernfehler der ersten Runde sind behoben:
+  - Ein Verbund kommt zustande, und alle Füchse senden im gemeinsamen Slotraster. In der Simulation liegt die Abweichung nach 3 h im Bereich weniger Millisekunden.
+  - Der Duty-Guard steuert das Timing und prüft vor jeder Aussendung den tatsächlichen Abstand.
+  - Profilwechsel können die Duty-Grenze nicht mehr aushebeln.
+  - Die Konfiguration ist korrekt CRC-gesichert.
+- Logik und Hardware sind getrennt; die Logik ist nativ testbar.
+- Die Bedienung ist nicht-blockierend, und im Fehlerzustand bleibt die CLI erreichbar.
+- Verbleibende Risiken:
+  - Verhalten auf echter Hardware (Ruhestrom, Funk, Pin-Hold).
+  - Zwei Grenzfälle der Verbundbildung, die eine Protokoll- oder Designentscheidung brauchen (A.2.1, A.2.2).
+
+**Im zweiten Review gefunden und behoben** (Fehler im neuen Sync-Code der Bugfix-Runde):
+
+| Befund | Behebung |
+|:-------|:---------|
+| Neustart des Masters ließ den Plan in der alten Master-Uhr stehen. Slaves rechneten 1:1 um und beendeten den Sync vorzeitig in falschem Raster. | Vor dem Einfrieren werden Plan und Messung verworfen und neu aufgebaut. Danach bleiben beide erhalten, und Beacons der neuen Instanz werden ignoriert. Der neu gestartete Fuchs reiht sich ins Raster ein (Tests `test_master_restart_*`). |
+| Menüpunkt 8/9 verwarf die laufende Messung (gleiche Wirkung). | Menüpunkt 8 löscht nur die gespeicherte Anzeige-Messung. |
+| Automatischer Neustart nach Kollision oder Abweichung erzeugte nach dem Sendebeginn einen unsynchronisierten Allein-Master. Dasselbe galt für den Auto-Neustart bei ausstehender Konfigurationsänderung. | Kein Auto-Neustart mehr bei Verbundfehlern. Verpasster Sendebeginn und ausstehender Neustart in einem laufenden Verbund werden Fehlerzustände. Die LED warnt schon während des Syncs. |
+| Ein später eingeschalteter Fuchs mit höchster MAC übernahm den Master und löschte bei allen die Driftmessung. Dasselbe passierte bei Menüpunkt 10 kurz nach dem Start. | „Klebriger" Master: Gewählt wird nur unter Füchsen, die fertig zugehört haben. Menüpunkt 10 wartet mindestens 30 s Messzeit ab. |
+| Die Planreserve (1 ms) war kleiner als die erlaubte Startverspätung (2 ms), der Guard konnte fälschlich blockieren. | Reserve 100 ppm + 10 ms. |
+| Pläne aus Beacons wurden ungeprüft übernommen. WLAN blieb bei ESP-NOW-Fehler an. `boot_id` wurde ohne aktiven Funk erzeugt. | Plausibilitätsprüfung, WLAN aus, `boot_id` erst nach dem WLAN-Start. |
+| CLI: Auch derselbe Wert erzwang einen Neustart, NVS-Fehler blieben unbemerkt, Menüpunkt 6 war im Fehlerzustand leer. | Behoben. Zusätzlich ein Hinweis, dass das Rufzeichen in Profil D nicht gesendet wird. |
+| AFU-Rufzeichen-Slot mit nur 250 ms Schutzabstand. | 500 ms. |
+| Testlücken: Master-Neustart, später Master, AFU-Teilmengen, inhaltsleere Morse-Tests, zu lockere 3-h-Toleranz. | Tests ergänzt bzw. korrigiert; Toleranz 10 ms bei voller Messdauer. |
+
+---
+
+## A.1 Hardware-Verifikation (P0 – offen)
+
+Die Bugfix-Runde ändert das Laufzeitverhalten grundlegend. Folgendes ist nur per Simulation und Build geprüft und muss vor einem Einsatz auf echter Hardware bestätigt werden:
+
+- [ ] **Synchronität im Verbund:** 3–5 Füchse, versetzt eingeschaltet. Slotbeginn per Empfänger oder Logic-Analyzer an GPIO3/GPIO4 über mindestens 2–3 h messen. Erwartung: Abweichung im ms-Bereich, keine Überlappung.
+- [ ] **Duty-Cycle messen:** Versorgungszeit an GPIO4 über 1 h für jedes Profil, mit 1 und 5 Füchsen sowie im AFU-Modus. Erwartung ≤ 9,5 % (AFU-Rufzeichen-Slot ≤ 50 %).
+- [ ] **Ruhestrom:** Profile A–C nach dem Sync (wach, 80 MHz, WLAN aus; erwartet etwa 10–20 mA), Sync-Phase (WLAN aktiv), Profil D im Deep-Sleep (µA). README-Abschnitt „Stromverbrauch" mit Messwerten ergänzen.
+- [ ] **GPIO-Hold im Deep-Sleep (2.5):** DATA und TX-VCC bleiben LOW; kein Stromfluss ins TX-Modul.
+- [ ] **Profil D Zyklus (L2):** Abstand der Aussendungen messen; der RC-Sleep-Timer ist ungenau. Wenn der Abstand unter 2432 ms liegt, die Schlafzeit um einige Prozent verlängern.
+- [ ] **Übernahme der v2-Konfiguration:** Ein Board mit 2.0.x-Konfiguration auf 2.1.0 flashen; Fox-ID, Profil und Rufzeichen müssen erhalten bleiben.
+- [ ] **Fehlerpfade:** Kollision, Abweichung, Nachzügler nach dem Einfrieren, Neustart des Masters vor und nach dem Einfrieren, Neustart kurz vor dem Start. LED-Muster und Meldungen müssen der README entsprechen.
+- [ ] **CLI auf beiden Boards** (Super Mini, Lolin C3 Mini): Eingabe, Backspace, Zeitüberschreitung, Fehlerzustand. Lolin C3 Mini: LED an GPIO7 (ggf. RGB-LED) prüfen.
+- [ ] **`setCpuFrequencyMhz(80)`** nach dem Sync: USB-CDC-Ausgabe und Tonfrequenz unverändert.
+
+---
+
+## A.2 Offene Befunde
+
+### A.2.1 P1 – Neustart nach dem Sendebeginn erzeugt einen unsynchronisierten Allein-Boot
+- **Ursache:** Nach dem Sendebeginn sind alle Füchse funkstill. Ein Fuchs, der danach (neu) startet, hört keinen Verbund und arbeitet als Allein-Boot mit eigenem Raster. Das betrifft RST-Taste, Brownout bei schwachem Akku während TX, Panic/Watchdog und einen manuellen Neustart aus der CLI im Fehlerzustand. Er überlappt dann periodisch mit dem Verbund.
+- **Bereits entschärft:** Kein automatischer Neustart mehr bei Verbundfehlern. Ein Neustart, der den Sendebeginn noch kennt, aber keinen Plan mehr bekommt, führt zum Fehlerzustand (`missedStart()`). README und CLI fordern „alle Füchse gemeinsam neu starten".
+- **Vorschlag (Designentscheidung):** Nach einem Software-, Brownout- oder Panic-Reset (`esp_reset_reason()`) nicht automatisch allein senden, sondern nur nach Power-on oder nach ausdrücklicher Bestätigung (Menüpunkt 10). Nachteil: Ein einzelner Fuchs muss nach einer Konfigurationsänderung einmal bestätigt bzw. aus- und eingeschaltet werden.
+
+### A.2.2 P1 – Einseitige oder teilweise Funkverbindung kann zwei Raster ergeben
+- **Simulation des Reviewers:**
+  - Hört A den Fuchs B nicht, B aber A, so wird A Solo-Master, während B ihn einplant. Zwei Zyklen laufen nebeneinander und überlappen regelmäßig.
+  - In einer Kette A–B–C ohne Verbindung A↔C bekommt C keinen Plan.
+- **Praxis:** In der Startphase liegen die Füchse meist nebeneinander, das Risiko ist daher eher gering. Beim Einschalten an verteilten Standorten ist es real.
+- **Vorschlag (Protokollerweiterung v4):**
+  - MAC des gewählten Masters im Beacon mitsenden.
+  - Der Master plant nur Füchse ein, die ihn bestätigen.
+  - Ein fremder Master gilt als Konflikt (nicht einfrieren).
+  - Ohne Plan bis zum Sendebeginn folgt der Fehlerzustand.
+- **Kurzfristig dokumentiert:** Alle Füchse gemeinsam und nah beieinander einschalten.
+
+### A.2.3 P2 – Kurzer Ausfall des Masters kostet die Driftmessung
+Hören die Slaves den Master 3 s lang nicht (6 verlorene Beacons), wählen sie neu. Kehrt er zurück, setzt sich nach der Regel „zwei Master → höhere MAC" eventuell wieder der alte durch. Jeder Wechsel verwirft die Messung; bei großem Abstand zum Start ist das unkritisch. **Vorschlag:** Messung je Master (MAC + `boot_id`) aufbewahren und `PEER_TIMEOUT_MS` für den Master verlängern.
+
+### A.2.4 P2 – Kein Hinweis, wenn ein Slave ohne Driftschätzung startet
+Die Log-Zeile beim Start zeigt „Drift … (nicht geschätzt)", aber keine LED-Warnung. Ohne Drift wächst die Abweichung mit der Quarzdifferenz (bis einige 100 ms/h); im ISM-Betrieb sind die Lücken ≥ 2 s groß, im AFU-Modus 500 ms. **Vorschlag:** einmaliges LED-Muster bzw. eine CLI-Warnung; Einschalten mindestens 30 s vor Start (ist dokumentiert).
+
+### A.2.5 P2 – Sendebetrieb und CLI-Zustandsautomat sind nicht unit-getestet
+`runArdfMode()` (verpasster Slot, Guard bei Startverspätung, Rufzeichen-Zähler) und `cli.cpp` hängen an `esp_timer`/`Serial`. **Vorschlag:** Zeitquelle bzw. `Stream` injizieren und die Logik nativ testen.
+
+### A.2.6 P3 – Firmware 2.0.x im selben Funkbereich wird ignoriert
+Beacons mit anderer Länge oder Protokollversion werden ohne Meldung verworfen. Ein noch nicht aktualisierter Fuchs bildet sein eigenes Raster. **Vorschlag:** Unbekannte Beacons auf Kanal 1 mit plausibler Länge (v2: 47 Byte, erstes Byte 2) als „fremde Firmware" melden.
+
+### A.2.7 P3 – Kleinigkeiten
+- [ ] Menüpunkt 10 am Slave schließt die CLI bis zum Reset (nur Menüpunkt-6-Status geht verloren).
+- [ ] `printMac()` existiert in `cli.cpp` und `sync_espnow.cpp`; `main.cpp` formatiert die MAC selbst. In eine gemeinsame Hilfsfunktion auslagern.
+- [ ] `FLAG_AFU_MODE` wird gesendet, aber nicht ausgewertet (rein informativ; die AFU-Kompatibilität prüft der Config-Hash).
+- [ ] Die Übernahme der v2-Konfiguration prüft bewusst keine CRC, weil deren Tabelle fehlerhaft war; Version und Felder werden geprüft. Im Code kommentiert.
+- [ ] Profil D: Die Pause hat keine Reserve für den RC-Sleep-Timer (siehe A.1, L2).
+
+### A.2.8 Offen aus der ersten Runde (Entscheidung oder Messung nötig)
+- [ ] **2.6** Rechtliche Prüfung des AFU-Betriebs durch einen Lizenzinhaber (Kennungsintervall, unbemannter Betrieb).
+- [ ] **7.7** Namen „Harm  , DK4HAA" / „Sebastian , DM8SB" in Copyright-Zeilen: Die Kürzung wirkt beabsichtigt; selbst entscheiden.
+- [ ] **7.8** Messwerte Stromaufnahme/Akkulaufzeit, Antennen- und Schaltplanverweise.
+- [ ] **4.8** Version per `git describe` (Build-Skript), **4.11** `pio check`/clang-format – Werkzeug-Erweiterungen.
+
+---
+
+## A.3 Empfohlene Reihenfolge (nächste Schritte)
+
+1. **Hardware-Verifikation A.1**, insbesondere Synchronität, Duty-Cycle und Ruhestrom. Erst danach im Einsatz verwenden.
+2. **Designentscheidung A.2.1** (kein automatischer Allein-Boot nach Software-Reset) und, falls Füchse verteilt eingeschaltet werden, **A.2.2** (Protokoll v4 mit Master-Bestätigung).
+3. A.2.3–A.2.5 (Robustheit und Testbarkeit des Sendebetriebs).
+4. Erweiterungen aus Teil B, Abschnitt B.9 nach Bedarf. Am meisten Nutzen bringen voraussichtlich Akkuüberwachung, Startverzögerung, Web-Serial-Konfigurator und Betriebsende.
+
+---
+
+# Teil B – Archiv: erste Review-Runde
+
+Die Bugfix-Runde hat diese Befunde in der empfohlenen Reihenfolge abgearbeitet (Commits `29ac264` bis `4164a00`, Nacharbeit `5013a50`). Legende: `[x]` erledigt, `[ ]` teilweise erledigt (siehe Vermerk), `[-]` nicht umgesetzt (Erweiterung bzw. bewusste Entscheidung). Zeilenangaben beziehen sich auf den Stand vor der Bugfix-Runde.
+
+## B.0 Gesamtbewertung der ersten Runde (Kurzfassung, Stand vor den Fixes)
 
 **Stärken**
 - Saubere Modulaufteilung (`morse`, `duty_guard`, `sync_espnow`, `time_sync`, `config_store`, `cli`, `tx_driver`), einheitliche Namespaces und Log-Präfixe.
@@ -39,7 +152,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 1. Kritische Funktionsfehler (Sync / Timing)
+## B.1 Kritische Funktionsfehler (Sync / Timing)
 
 - [x] **P0 – 1.1 Config-Hash enthält die Fox-ID → alle Füchse sind gegenseitig „inkompatibel"**
   [config_store.cpp:145-157](../src/config_store.cpp#L145-L157), [sync_espnow.cpp:83-87](../src/sync_espnow.cpp#L83-L87), [sync_espnow.cpp:200-202](../src/sync_espnow.cpp#L200-L202)
@@ -80,7 +193,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 - [x] **P1 – 1.7 Slaves übernehmen den Zyklusstart des Masters nie**
   [sync_espnow.cpp:65-151](../src/sync_espnow.cpp#L65-L151), [sync_espnow.cpp:352-356](../src/sync_espnow.cpp#L352-L356)
   `beacon.cycle_start_us` und `beacon.cycle_ms/slot_ms` werden im Empfänger nicht ausgewertet. Der Master setzt `cycle_start_us` außerdem erst beim Sync-Ende, und dann werden keine Beacons mehr verschickt. Die Rollen Master/Slave haben damit keine Wirkung.
-  **Erledigt:** Slaves übernehmen Zyklus, Slot, Reihenfolge und Sendebeginn aus dem Beacon des Masters (`copyPlanFromBeacon()` in [sync_logic.cpp](../src/sync_logic.cpp)). Der Sendebeginn wird zudem im Verbund vererbt (`FLAG_HAS_START`), sodass ein später eingeschalteter Fuchs mit höherer MAC den Start nicht verschiebt (`test_five_foxes_stay_aligned_3h`, `test_master_leaves`).
+  **Erledigt:** Slaves übernehmen Zyklus, Slot, Reihenfolge und Sendebeginn aus dem Beacon des Masters (`copyPlanFromBeacon()` in [sync_logic.cpp](../src/sync_logic.cpp), mit Plausibilitätsprüfung). Der Sendebeginn wird im Verbund vererbt (`FLAG_HAS_START`). Seit dem zweiten Review bleibt der Master Master; ein später eingeschalteter Fuchs übernimmt nicht und löscht keine laufende Messung. Tests: `test_five_foxes_stay_aligned_3h`, `test_late_high_mac_keeps_master`, `test_master_leaves`, `test_master_restart_*`.
 
 - [x] **P1 – 1.8 CLI-Timeout beendet die Startphase vor dem Sync-Ende**
   [main.cpp:124-130](../src/main.cpp#L124-L130), [config.h:42-44](../src/config.h#L42-L44), [config.h:54](../src/config.h#L54)
@@ -122,7 +235,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 2. Regulatorik / HF-Sicherheit
+## B.2 Regulatorik / HF-Sicherheit
 
 - [x] **P0 – 2.1 Profilwechsel D → A/B/C in der CLI führt zu > 10 % Duty**
   [main.cpp:101-108](../src/main.cpp#L101-L108), [sync_espnow.cpp:257-266](../src/sync_espnow.cpp#L257-L266), [main.cpp:326](../src/main.cpp#L326)
@@ -145,7 +258,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 - [x] **P1 – 2.4 Rufzeichen-Slot passt in keinem Profil in den Slot**
   Nachgerechnet für MO5 + 7 dit + „DL1ABC/P": Profil A 12,1 s (Slot 12 s), **B 8,6 s (Slot 6 s), C 7,2 s (Slot 4 s)**. Der Fuchs sendet dann in den Slot des nächsten Fuchses.
   **Fix:** Länge vorab prüfen (CLI-Warnung, ggf. blockieren), im AFU-Slot das Rufzeichen statt der MO-Kennung senden, oder das Rufzeichen auf mehrere Slots verteilen.
-  **Erledigt:** Mit dem Slotplan gelöst (vorgezogen aus Schritt 3): Jeder Fuchs meldet seine längste Aussendung (`tx_max_ms`), der Slot ist mindestens so lang wie die längste Aussendung im Verbund + 250 ms Schutzabstand. Im AFU-Modus wird der Zyklus dadurch länger (Profil C mit „DL1ABC/P": Slot ≈ 7,4 s). Test: `test_callsign_slot_fits`.
+  **Erledigt:** Mit dem Slotplan gelöst (vorgezogen aus Schritt 3): Jeder Fuchs meldet seine längste Aussendung (`tx_max_ms`). Der Slot ist mindestens so lang wie die längste Aussendung im Verbund + 500 ms Schutzabstand. Im AFU-Modus wird der Zyklus dadurch länger (Profil C mit „DL1ABC/P": Slot ≈ 7,7 s). Tests: `test_callsign_slot_fits`, `test_all_subsets_afu`.
 
 - [x] **P1 – 2.5 GPIO-Zustand im Deep-Sleep nicht definiert** *(prüfen)*
   [main.cpp:358-375](../src/main.cpp#L358-L375)
@@ -164,7 +277,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 3. Weitere Fehler
+## B.3 Weitere Fehler
 
 - [x] **P1 – 3.1 CRC32-Tabelle ist fehlerhaft (116 von 256 Einträgen)**
   [config_store.cpp:17-61](../src/config_store.cpp#L17-L61)
@@ -178,7 +291,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   - Ein Tastendruck löst den Neustart aus, die Ausgabe sagt aber „Automatische Wiederherstellung". Die Meldung „Bitte Fox-Nummer über CLI ändern" ist im Fehlerzustand nicht umsetzbar, weil es dort keine CLI gibt.
   - Ein Mismatch eines *einzelnen* Fremdgeräts legt den ganzen Verbund lahm.
   **Vorschlag:** Bei Mismatch den inkompatiblen Peer ignorieren und mit den kompatiblen weiterarbeiten. Bei Kollision deterministisch auflösen (z. B. höhere MAC gibt nach und meldet sich). Im Fehlerzustand direkt in die CLI springen. Nach N erfolglosen Versuchen in den Tiefschlaf gehen statt endlos neu zu starten.
-  **Erledigt:** Neue Fehlerbehandlung in [main.cpp](../src/main.cpp) `handleError()`: kein Senden, LED-Muster, die **CLI bleibt bedienbar** (Konfiguration korrigieren, Neustart über 11). Nach 60 s ohne Eingabe folgt ein Neuversuch per Neustart, aber nur bei Fehlern, die ein anderer Fuchs verursacht haben kann (Kollision, Abweichung, ESP-NOW-Start), und höchstens 5-mal (Zähler in `RTC_NOINIT`, zurückgesetzt bei Power-on/RST und erfolgreichem Start). Danach Tiefschlaf ohne Weckzeit bis zum Reset, damit der Akku geschont wird. Ein Tastendruck löst keinen Neustart mehr aus. **Bewusst beibehalten:** Bei einer Konfigurations-Abweichung sendet niemand, weil zwei unabhängige Raster auf derselben Frequenz kollidieren würden; Abhilfe gegen Fremdgeräte wäre die Gruppen-ID aus 8.3 (Erweiterung).
+  **Erledigt:** Neue Fehlerbehandlung in [main.cpp](../src/main.cpp) `handleError()`: kein Senden, LED-Muster, die **CLI bleibt bedienbar**, ein Tastendruck löst keinen Neustart mehr aus. Kollision und Abweichung zeigt die LED schon während der Sync-Phase, damit sie vor dem Sendebeginn behoben werden können. **Nach dem zweiten Review geändert:** Verbundfehler werden erst zum Sendebeginn festgestellt; ein automatischer Neustart danach würde unsynchronisiert allein senden. Deshalb gibt es einen Neuversuch nur noch bei einem ESP-NOW-Startfehler (höchstens 5×, Zähler in `RTC_NOINIT`). Sonst gilt nach 60 s ohne Eingabe: Tiefschlaf bis zum Reset, mit der Anweisung „alle Füchse gemeinsam neu starten". Bei einer Abweichung sendet bewusst niemand (zwei Raster würden kollidieren); gegen Fremdgeräte hilft die Gruppen-ID aus 8.3.
 
 - [x] **P1 – 3.3 Konfigurationsänderungen in der CLI wirken nicht auf den laufenden Sync**
   [cli.cpp:107-162](../src/cli.cpp#L107-L162), [main.cpp:101](../src/main.cpp#L101)
@@ -216,7 +329,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 4. Code-Qualität & Architektur
+## B.4 Code-Qualität & Architektur
 
 - [x] **P2 – 4.1 Toter bzw. unbenutzter Code entfernen oder anschließen**
   `rtc_initialized`, `rtc_cycle_start_us`, `rtc_own_slot_idx` (nur geschrieben), `sync::extendSyncWindow()`, `timesync::getCorrectedOffsetUs()`, `cli::resetIdleTimer()`, Rückgabewert von `cli::process()`, `isValidProfileId()`, `blinkHeartbeat/Idle/DutyBlocked`, `FoxProfile::fox_count`, die Parameter `with_callsign/callsign_len` in `calculateTxOnTimeMs` (inkl. unbenutztem `cs_ptr` in [fox_profile.cpp:124](../src/fox_profile.cpp#L124)), der Fall `ERR_DUTY_BLOCKED` in `handleError`.
@@ -251,7 +364,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 5. Tests, Build, CI
+## B.5 Tests, Build, CI
 
 - [x] **P1 – 5.1 Die Tests testen nicht den Produktionscode**
   [test/test_duty/test_duty.cpp:13-47](../test/test_duty/test_duty.cpp#L13-L47), [test/test_morse/test_morse.cpp:12-60](../test/test_morse/test_morse.cpp#L12-L60)
@@ -278,7 +391,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 6. Bedienung / Usability
+## B.6 Bedienung / Usability
 
 - [ ] **P1 – 6.1 Startablauf ist für den Feldeinsatz unklar und lang**
   Jeder Fuchs braucht ≥ 120 s bis zur ersten Aussendung, ohne sichtbaren Countdown oder Fortschritt. Ob der Sync erfolgreich war (Anzahl gefundener Füchse), sieht man nur mit Laptop.
@@ -286,7 +399,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   - Nach Sync-Ende per LED die Anzahl der gefundenen Füchse blinken (z. B. n× kurz) und die eigene Fox-ID (n× lang).
   - Countdown in der seriellen Ausgabe („Start in 45 s, 3 Füchse gefunden").
   - Startphase vorzeitig beenden, sobald alle erwarteten Füchse gefunden und stabil sind.
-  **Teilweise erledigt:** Der Sendebeginn ist jetzt fest und vorhersagbar (120 s nach dem Einschalten des ersten Fuchses). Er erscheint im Log beim Einfrieren („Slotplan fest – Sendebeginn in x s") und in Menüpunkt 6 mit Restzeit; Menüpunkt 10 am Master zieht ihn vor. **Nicht umgesetzt (Erweiterungen):** LED-Rückmeldung der gefundenen Füchse/eigenen Fox-ID und vorzeitiges Ende der Startphase, sobald alle erwarteten Füchse da sind.
+  **Teilweise erledigt:** Der Sendebeginn ist jetzt fest und vorhersagbar (120 s nach dem Einschalten des ersten Fuchses). Er erscheint im Log beim Einfrieren („Slotplan fest – Sendebeginn in x s") und in Menüpunkt 6 mit Restzeit. Menüpunkt 10 am Master zieht ihn vor (frühestens nach 30 s Messzeit). Kollision und Abweichung zeigt die LED schon während des Syncs. **Nicht umgesetzt (Erweiterungen):** LED-Rückmeldung der gefundenen Füchse/eigenen Fox-ID und vorzeitiges Ende der Startphase, sobald alle erwarteten Füchse da sind.
 - [x] **P1 – 6.2 Nach Konfigurationsänderung Neustart anbieten bzw. erzwingen**
   Nach Änderung von Fox-ID, Profil oder Rufzeichen: „Änderung gespeichert – Neustart erforderlich, jetzt neu starten? (J/N)". Mindestens Menüpunkt 10 sperren, bis neu gestartet wurde. Behebt 2.1 und 3.3.
   **Erledigt:** Nach dem Speichern von Fox-ID, Profil, Rufzeichen oder Werkseinstellungen fragt die CLI „Jetzt neu starten? (J/N)". Ohne Neustart ist Menüpunkt 10 gesperrt, und beim Auto-Timeout wird neu gestartet statt mit veraltetem Zustand zu senden.
@@ -319,7 +432,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 7. Dokumentation
+## B.7 Dokumentation
 
 - [x] **P2 – 7.1 README: Plattformaussage falsch** ([README.md:325-328](../README.md#L325-L328))
   `espressif32 @ ^6.8.0` liefert Arduino-Core **2.0.17**, nicht ≥ 3.0 (siehe Build-Ausgabe `framework-arduinoespressif32 @ 3.20017…`).
@@ -346,9 +459,11 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ---
 
-## 8. Verbesserungsvorschläge (Design)
+## B.8 Verbesserungsvorschläge (Design)
 
-### 8.1 Neues Timing-Konzept für den Verbund (behebt 1.2–1.9, 2.2)
+### B.8.1 Neues Timing-Konzept für den Verbund (behebt 1.2–1.9, 2.2)
+**Status:** Umgesetzt in abgewandelter Form (Entscheidung des Nutzers): Statt Deep-Sleep mit Funk-Resync bleiben die Füchse im ARDF-Betrieb wach und nutzen den Quarz. Umgesetzt sind die Punkte 1 (Zeitmodell nur gegen den Master), 2 (absolute Sendezeitpunkte) und 4 (verbundweiter Plan). Die Punkte 3, 5, 6 und 7 entfallen damit.
+
 
 1. **Gemeinsame Zeitbasis:** Der Master verteilt im Beacon `master_time_us` und `cycle_start_us` (in Master-Zeit). Slaves rechnen nur gegen den Master: `offset = local − master`.
 2. **Absolute Sendezeitpunkte:** `t_tx(k) = cycle_start + k·cycle + slot_idx·slot`. Nach dem Senden wird *nicht* „Zyklus minus Vorlauf" geschlafen, sondern bis `t_tx(k+1) − vorlauf`. Danach wird aktiv (Busy-Wait oder Light-Sleep) bis `t_tx(k+1)` gewartet. So akkumulieren sich weder TX-Dauer noch Bootzeit.
@@ -358,22 +473,30 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 6. **Fallback:** Hört ein Slave den Master K-mal nicht, sendet er im zuletzt bekannten Raster weiter (mit wachsendem Schutzabstand) und meldet das per LED.
 7. **Kalibrierung des RTC-Oszillators:** Während der Sync-Phase den RC-Takt gegen den Quarz messen (`rtc_clk_cal()` bzw. Messung über zwei kurze Schlafphasen) und den Sleep damit korrigieren. Das wäre der eigentliche Sinn der „Driftkorrektur".
 
-### 8.2 Duty-Guard als echte Sendezeitbilanz
+### B.8.2 Duty-Guard als echte Sendezeitbilanz
+**Status:** Teilweise – Laufzeit-Guard mit Mindestabstand je Aussendung (strenger als eine 1-h-Bilanz) umgesetzt. Eine Bilanz im RTC-RAM ist dadurch nicht nötig.
+
 Im RTC-RAM einen Ringpuffer der letzten TX-Starts und -Dauern führen (z. B. 1 h). Vor jedem TX die Bilanz prüfen. Bei Überschreitung verschieben statt nur loggen. Der Guard bleibt so unabhängig von Fehlern in der Zeitplanung, als letzte Sicherheitsinstanz.
 
-### 8.3 Robustere Verbundbildung
+### B.8.3 Robustere Verbundbildung
+**Status:** Absender-MAC aus dem Empfang umgesetzt (Protokoll v3). Gruppen-ID und Verschlüsselung offen (Erweiterung), siehe auch A.2.2.
+
 - Event-/Gruppen-ID (z. B. 16 Bit, in der CLI setzbar) im Beacon, damit Fremdgeräte oder Nachbarveranstaltungen ignoriert werden.
 - Optional ESP-NOW-Verschlüsselung (PMK/LMK aus Gruppen-ID abgeleitet) oder zumindest ein HMAC über den Beacon.
 - Absender-MAC aus `recv_info->src_addr` statt aus dem Payload nehmen.
 
-### 8.4 Energie
+### B.8.4 Energie
+**Status:** Konfiguration im RTC-RAM umgesetzt (3.7). Strombudget messen siehe A.1; Rest offen.
+
 - Konfiguration im RTC-RAM statt NVS-Lesen pro Zyklus (3.7).
 - `Serial.begin()` und `delay` im Wake-Pfad nur bei angeschlossenem USB (`HWCDC`-Verbindungsstatus prüfen).
 - Strombudget messen und dokumentieren (Sync-Phase mit WiFi ~80–100 mA über 2–3 min ist relevant).
 
 ---
 
-## 9. Erweiterungsvorschläge (Features)
+## B.9 Erweiterungsvorschläge (Features)
+
+**Status:** Laut Auftrag nicht umgesetzt (nur Fehlerbehebung), weiterhin offen.
 
 - [ ] **Akkuspannungsmessung** (ADC + Spannungsteiler): Anzeige in der CLI, Warnung per LED, optional per Morse („LB") im AFU-Modus. Abschalten unter einer Mindestspannung, um Tiefentladung zu vermeiden.
 - [ ] **Startzeit / Startverzögerung**: „Sendebeginn in 30 min" bzw. zu einer Uhrzeit (über den Master synchronisiert). Die Füchse können so vorab ausgelegt werden, ohne Akku zu verbrauchen, ARDF-typisch.
@@ -388,7 +511,9 @@ Im RTC-RAM einen Ringpuffer der letzten TX-Starts und -Dauern führen (z. B. 1 h
 
 ---
 
-## 10. Empfohlene Reihenfolge
+## B.10 Reihenfolge der Bugfix-Runde (abgeschlossen)
+
+Schritte 1–4 sind abgearbeitet, Schritt 5 (Erweiterungen) ist laut Auftrag entfallen.
 
 1. **Sofort (Sicherheit):** 2.1 und 2.2 (Duty bei Profilwechsel, Guard steuert das Timing), 6.2 (Neustart nach Änderung), 2.5 (GPIO-Hold im Deep-Sleep).
 2. **Verbund lauffähig machen:** 1.1 (Hash), dann das Timing-Konzept 8.1 mit 1.2–1.9 und 1.11. Parallel 5.1/5.2 (native Tests gegen den echten Code) als Absicherung.
