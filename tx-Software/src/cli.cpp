@@ -20,7 +20,7 @@
 #include <cstring>
 
 // Externer Zugriff auf die globale Konfiguration (in main.cpp definiert)
-extern ConfigV2 g_config;
+extern FoxConfig g_config;
 extern bool g_start_normal_mode;
 
 namespace ardf {

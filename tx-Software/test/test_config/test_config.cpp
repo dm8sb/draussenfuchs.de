@@ -42,7 +42,7 @@ void test_hash_differs_by_afu_mode(void) {
 // ---- Validierung ----
 
 void test_defaults_are_valid(void) {
-    ConfigV2 cfg;
+    FoxConfig cfg;
     config::resetToDefaults(cfg);
     TEST_ASSERT_TRUE(config::isValidConfig(cfg));
     TEST_ASSERT_EQUAL_UINT8(DEFAULT_FOX_ID, cfg.fox_id);
@@ -51,10 +51,49 @@ void test_defaults_are_valid(void) {
 }
 
 void test_invalid_fox_id_rejected(void) {
-    ConfigV2 cfg;
+    FoxConfig cfg;
     config::resetToDefaults(cfg);
     cfg.fox_id = 6;
     TEST_ASSERT_FALSE(config::isValidConfig(cfg));
+}
+
+// ---- CRC-32 (Befund 3.1) ----
+
+// Standard-Testvektor der CRC-32 (IEEE 802.3)
+void test_crc32_check_value(void) {
+    const char* s = "123456789";
+    TEST_ASSERT_EQUAL_HEX32(0xCBF43926, config::crc32(reinterpret_cast<const uint8_t*>(s), 9));
+    TEST_ASSERT_EQUAL_HEX32(0x00000000, config::crc32(nullptr, 0));
+}
+
+void test_crc_detects_change(void) {
+    FoxConfig cfg;
+    config::resetToDefaults(cfg);
+    cfg.profile_id = PROFILE_A_ID;   // ohne neue CRC
+    TEST_ASSERT_FALSE(config::isValidConfig(cfg));
+    config::updateCrc(cfg);
+    TEST_ASSERT_TRUE(config::isValidConfig(cfg));
+}
+
+void test_wrong_version_rejected(void) {
+    FoxConfig cfg;
+    config::resetToDefaults(cfg);
+    cfg.version = CONFIG_VERSION_LEGACY;
+    config::updateCrc(cfg);
+    TEST_ASSERT_FALSE(config::isValidConfig(cfg));
+    TEST_ASSERT_TRUE(config::isValidFields(cfg));   // Übernahme aus v2 möglich
+}
+
+// Rufzeichen ohne Nullterminator oder mit unerlaubten Zeichen
+void test_callsign_fields(void) {
+    FoxConfig cfg;
+    config::resetToDefaults(cfg);
+    strcpy(cfg.callsign, "DL1ABC/P");
+    TEST_ASSERT_TRUE(config::isValidFields(cfg));
+    strcpy(cfg.callsign, "dl1abc");
+    TEST_ASSERT_FALSE(config::isValidFields(cfg));
+    memset(cfg.callsign, 'A', sizeof(cfg.callsign));   // kein Terminator
+    TEST_ASSERT_FALSE(config::isValidFields(cfg));
 }
 
 // ---- Hauptfunktion ----
@@ -70,6 +109,10 @@ int main(int, char**) {
     RUN_TEST(test_hash_differs_by_afu_mode);
     RUN_TEST(test_defaults_are_valid);
     RUN_TEST(test_invalid_fox_id_rejected);
+    RUN_TEST(test_crc32_check_value);
+    RUN_TEST(test_crc_detects_change);
+    RUN_TEST(test_wrong_version_rejected);
+    RUN_TEST(test_callsign_fields);
 
     return UNITY_END();
 }

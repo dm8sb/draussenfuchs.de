@@ -13,41 +13,57 @@
 namespace ardf {
 namespace config {
 
-bool loadConfig(ConfigV2& cfg) {
+bool loadConfig(FoxConfig& cfg) {
     Preferences prefs;
     if (!prefs.begin(NVS_NAMESPACE_CFG, true)) {
         Serial.println(LOG_CFG "NVS-Namespace konnte nicht geöffnet werden");
         resetToDefaults(cfg);
         return false;
     }
-    size_t len = prefs.getBytes(NVS_KEY_CFG, &cfg, sizeof(ConfigV2));
-    prefs.end();
-
-    if (len != sizeof(ConfigV2) || !isValidConfig(cfg)) {
-        Serial.println(LOG_CFG "Konfiguration ungültig oder nicht vorhanden – Werkseinstellungen geladen");
-        resetToDefaults(cfg);
-        return false;
+    size_t len = prefs.getBytes(NVS_KEY_CFG, &cfg, sizeof(FoxConfig));
+    if (len == sizeof(FoxConfig) && isValidConfig(cfg)) {
+        prefs.end();
+        Serial.println(LOG_CFG "Konfiguration aus NVS geladen");
+        return true;
     }
 
-    Serial.println(LOG_CFG "Konfiguration aus NVS geladen");
-    return true;
+    // Übernahme aus v2.0.x: Deren CRC-Tabelle war fehlerhaft, deshalb nur
+    // Version und Felder prüfen und mit korrekter CRC neu speichern
+    FoxConfig legacy;
+    len = prefs.getBytes(NVS_KEY_CFG_LEGACY, &legacy, sizeof(FoxConfig));
+    prefs.end();
+    if (len == sizeof(FoxConfig) && legacy.version == CONFIG_VERSION_LEGACY &&
+        isValidFields(legacy)) {
+        cfg = legacy;
+        cfg.version = CONFIG_VERSION;
+        updateCrc(cfg);
+        if (saveConfig(cfg) && prefs.begin(NVS_NAMESPACE_CFG, false)) {
+            prefs.remove(NVS_KEY_CFG_LEGACY);
+            prefs.end();
+        }
+        Serial.println(LOG_CFG "Konfiguration aus Firmware v2.0 übernommen");
+        return true;
+    }
+
+    Serial.println(LOG_CFG "Konfiguration ungültig oder nicht vorhanden – Werkseinstellungen geladen");
+    resetToDefaults(cfg);
+    return false;
 }
 
-bool saveConfig(const ConfigV2& cfg) {
+bool saveConfig(const FoxConfig& cfg) {
     // CRC32 vor dem Speichern berechnen
-    ConfigV2 saveCfg = cfg;
-    saveCfg.crc32 = crc32(reinterpret_cast<const uint8_t*>(&saveCfg),
-                           sizeof(ConfigV2) - sizeof(uint32_t));
+    FoxConfig saveCfg = cfg;
+    updateCrc(saveCfg);
 
     Preferences prefs;
     if (!prefs.begin(NVS_NAMESPACE_CFG, false)) {
         Serial.println(LOG_ERR "NVS-Namespace konnte nicht zum Schreiben geöffnet werden");
         return false;
     }
-    size_t written = prefs.putBytes(NVS_KEY_CFG, &saveCfg, sizeof(ConfigV2));
+    size_t written = prefs.putBytes(NVS_KEY_CFG, &saveCfg, sizeof(FoxConfig));
     prefs.end();
 
-    if (written != sizeof(ConfigV2)) {
+    if (written != sizeof(FoxConfig)) {
         Serial.println(LOG_ERR "Fehler beim Speichern der Konfiguration");
         return false;
     }

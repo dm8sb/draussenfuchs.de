@@ -67,7 +67,7 @@ static void onReceive(const uint8_t* mac_addr,
     xQueueSend(rx_queue, &item, 0);   // Queue voll: Beacon verwerfen
 }
 
-bool initSync(const ConfigV2& cfg) {
+bool initSync(const FoxConfig& cfg) {
     const FoxProfile& prof = getProfile(cfg.profile_id);
     if (!prof.use_espnow) return true;   // Profil D: kein ESP-NOW
 

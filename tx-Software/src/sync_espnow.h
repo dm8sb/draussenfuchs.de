@@ -17,7 +17,7 @@ namespace ardf {
 namespace sync {
 
 // ESP-NOW initialisieren und Sync starten (Profil D: nichts zu tun, true)
-bool initSync(const ConfigV2& cfg);
+bool initSync(const FoxConfig& cfg);
 
 // Empfangene Beacons auswerten, Zustand fortschreiben, Beacons senden
 // (non-blocking, in der Startphase regelmäßig aufrufen)

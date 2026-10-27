@@ -14,25 +14,31 @@
 namespace ardf {
 namespace config {
 
-// CRC32-Berechnung (Software-Implementierung)
+// CRC-32 (IEEE 802.3, wie zlib)
 uint32_t crc32(const uint8_t* data, size_t length);
 
+// CRC-Feld einer Konfiguration neu berechnen
+void updateCrc(FoxConfig& cfg);
+
 // Konfiguration aus NVS laden (gibt true zurück bei Erfolg)
-bool loadConfig(ConfigV2& cfg);
+bool loadConfig(FoxConfig& cfg);
 
 // Konfiguration in NVS speichern
-bool saveConfig(const ConfigV2& cfg);
+bool saveConfig(const FoxConfig& cfg);
 
 // Konfiguration auf Werkseinstellungen zurücksetzen
-void resetToDefaults(ConfigV2& cfg);
+void resetToDefaults(FoxConfig& cfg);
 
 // Config-Hash berechnen (CRC32 über ConfigHashInput, verbundweite Parameter)
 uint32_t calculateConfigHash(uint8_t profile_id,
                               uint16_t slot_ms, uint8_t wpm,
                               bool callsign_empty, uint8_t morse_repeats);
 
-// Konfiguration validieren
-bool isValidConfig(const ConfigV2& cfg);
+// Konfiguration validieren (Version, CRC und Felder)
+bool isValidConfig(const FoxConfig& cfg);
+
+// Nur die Felder prüfen (Fox-ID, Profil, Rufzeichen) – für die Übernahme von v2
+bool isValidFields(const FoxConfig& cfg);
 
 // NVS komplett löschen (Werkseinstellungen)
 void eraseAllNvs();

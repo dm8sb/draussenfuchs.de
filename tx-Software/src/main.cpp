@@ -28,7 +28,7 @@
 #include <driver/gpio.h>
 
 // ---- Globale Konfiguration ----
-ConfigV2 g_config;
+FoxConfig g_config;
 bool g_start_normal_mode = false;
 
 // ---- Fehlerzustände ----

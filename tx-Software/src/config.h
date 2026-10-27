@@ -87,13 +87,19 @@ constexpr uint16_t FOX_TONE_HZ[MAX_FOXES]  = {700, 800, 900, 1000, 1200};
 
 // ---- NVS-Namespaces ----
 constexpr const char* NVS_NAMESPACE_CFG     = "ardf_fox";
-constexpr const char* NVS_KEY_CFG           = "cfg_v2";
+constexpr const char* NVS_KEY_CFG           = "cfg_v3";
+constexpr const char* NVS_KEY_CFG_LEGACY    = "cfg_v2";  // v2.0.x: wird beim Laden übernommen
 constexpr const char* NVS_NAMESPACE_TIME    = "timecorr";
 constexpr const char* NVS_KEY_TIME          = "tc_v2";   // letzte Messung (nur Anzeige)
 
 // ---- Config-Struct (NVS-Persistenz) ----
-struct __attribute__((packed)) ConfigV2 {
-    uint8_t  version;        // = 2
+// Version 3: gleiches Layout wie Version 2, aber Standard-CRC-32 (v2 hatte eine
+// fehlerhafte CRC-Tabelle).
+constexpr uint8_t CONFIG_VERSION        = 3;
+constexpr uint8_t CONFIG_VERSION_LEGACY = 2;
+
+struct __attribute__((packed)) FoxConfig {
+    uint8_t  version;        // = CONFIG_VERSION
     uint8_t  fox_id;         // 1..5
     uint8_t  profile_id;     // 0..3
     char     callsign[13];   // Max. 12 Zeichen + Null-Terminator

@@ -164,10 +164,11 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ## 3. Weitere Fehler
 
-- [ ] **P1 – 3.1 CRC32-Tabelle ist fehlerhaft (116 von 256 Einträgen)**
+- [x] **P1 – 3.1 CRC32-Tabelle ist fehlerhaft (116 von 256 Einträgen)**
   [config_store.cpp:17-61](../src/config_store.cpp#L17-L61)
   Gegen die Standard-CRC-32 (Polynom 0xEDB88320) geprüft. Erste Abweichungen bei Index 10, 13, 14, 15, 42, … Teilweise sind Werte doppelt, z. B. `0x3B6E20C8`. Funktional ist die Prüfsumme deterministisch, aber keine CRC-32 mehr: schwächere Fehlererkennung, keine Interoperabilität mit Fremdwerkzeugen.
   **Fix:** ROM-Funktion `esp_rom_crc32_le()` (bzw. `crc32_le()` aus `esp_crc.h`) verwenden oder die Tabelle zur Compile-Zeit per `constexpr` generieren. Achtung: Das ändert die gespeicherte CRC. NVS-Key/Version hochzählen (`cfg_v3`) oder beim Laden beide CRCs akzeptieren.
+  **Erledigt:** Bitweise Standard-CRC-32 (Polynom 0xEDB88320) statt der fehlerhaften Tabelle; Testvektor „123456789" → 0xCBF43926 in `test_config`. Konfiguration jetzt Version 3 unter `cfg_v3` (Struktur `FoxConfig`). Gespeicherte v2-Konfigurationen werden beim ersten Start übernommen (Version + Feldprüfung, dann mit korrekter CRC neu gespeichert, alter Schlüssel gelöscht), Füchse müssen nach dem Update also nicht neu eingestellt werden. Nebenbei behoben: Ein Rufzeichen ohne Nullterminator galt bisher als gültig.
 
 - [ ] **P1 – 3.2 Fehlerbehandlung: Endlosschleife aus Neustarts, irreführende Meldung**
   [main.cpp:380-448](../src/main.cpp#L380-L448)
@@ -244,14 +245,14 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   Beide Testdateien enthalten eine *Kopie* der Morse-Tabelle bzw. der Duty-Formeln. Fehler im echten Code (z. B. 1.1, 2.2, 2.3, 3.1) bleiben so unentdeckt.
   **Fix:** Eine `[env:native]` in `platformio.ini` (`platform = native`, `test_build_src = yes`, `build_src_filter` auf die Arduino-freien Module), die Tests gegen die echten Header/Quellen.
   **Erledigt:** Neue Envs `native` (GCC im PATH) und `native_win` (MinGW über PlatformIO) mit `test_build_src = yes` und einem `build_src_filter` auf die hardwareunabhängigen Module. Beide Testdateien binden jetzt die echten Header/Quellen ein, die Kopien der Tabellen und Formeln sind entfernt. Aufruf: `pio test -e native_win` (Windows) bzw. `pio test -e native`. Die Firmware-Env ignoriert Tests (`test_ignore`).
-- [ ] **P1 – 5.2 Fehlende Tests für die kritischen Pfade**
+- [x] **P1 – 5.2 Fehlende Tests für die kritischen Pfade**
   - Config-Hash: zwei Füchse mit unterschiedlicher ID, sonst gleich → kompatibel (deckt 1.1 auf)
   - Slotplan/Sendezeitpunkt über viele Zyklen ohne Akkumulation (1.2/1.3)
   - Gleicher effektiver Zyklus auf allen Füchsen (1.5)
   - Duty-Bilanz bei Profilwechsel (2.1), Callsign-Slot-Länge ≤ Slot (2.4)
   - CRC32 gegen bekannte Testvektoren (`"123456789"` → `0xCBF43926`) (3.1)
   - Regression mit synthetischer Drift (+/− ppm, Ausreißer), Vorzeichen (1.10)
-  **Teilweise erledigt:** Neu: `test_config` (Hash ohne Fox-ID), `test_schedule` (Slotplan, alle Fox-Teilmengen ISM-konform, Rufzeichen-Slot), `test_duty` (Budget, Guard, Profilwechsel-Szenario), `test_timesync` (Drift ±, Ausreißer, Ringpuffer), `test_sync` (Verbund-Simulation: Ausrichtung nach 3 h, Kollision, Mismatch, Nachzügler, Masterausfall, vorgezogener Start, Allein-Boot). CRC-Testvektor folgt mit 3.1.
+  **Erledigt:** Alle genannten Testfälle sind vorhanden, inklusive CRC-Testvektor (`test_crc32_check_value`). Insgesamt 67 native Tests.
 - [ ] **P2 – 5.3 Build-Umgebungen**
   - Ein eigenes `[env:esp32c3_supermini]` (README nennt den Super Mini als Hauptziel, gebaut wird nur `lolin_c3_mini`).
   - `platform = espressif32 @ 6.8.x` exakt pinnen (reproduzierbare Builds).
