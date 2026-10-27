@@ -170,33 +170,37 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   **Fix:** ROM-Funktion `esp_rom_crc32_le()` (bzw. `crc32_le()` aus `esp_crc.h`) verwenden oder die Tabelle zur Compile-Zeit per `constexpr` generieren. Achtung: Das ändert die gespeicherte CRC. NVS-Key/Version hochzählen (`cfg_v3`) oder beim Laden beide CRCs akzeptieren.
   **Erledigt:** Bitweise Standard-CRC-32 (Polynom 0xEDB88320) statt der fehlerhaften Tabelle; Testvektor „123456789" → 0xCBF43926 in `test_config`. Konfiguration jetzt Version 3 unter `cfg_v3` (Struktur `FoxConfig`). Gespeicherte v2-Konfigurationen werden beim ersten Start übernommen (Version + Feldprüfung, dann mit korrekter CRC neu gespeichert, alter Schlüssel gelöscht), Füchse müssen nach dem Update also nicht neu eingestellt werden. Nebenbei behoben: Ein Rufzeichen ohne Nullterminator galt bisher als gültig.
 
-- [ ] **P1 – 3.2 Fehlerbehandlung: Endlosschleife aus Neustarts, irreführende Meldung**
+- [x] **P1 – 3.2 Fehlerbehandlung: Endlosschleife aus Neustarts, irreführende Meldung**
   [main.cpp:380-448](../src/main.cpp#L380-L448)
   - Bei Kollision oder Mismatch startet der Fuchs alle 60 s neu, synct erneut, scheitert erneut, und das endlos. Im Gelände bemerkt das niemand, und der Akku wird leergezogen (WiFi aktiv).
   - Ein Tastendruck löst den Neustart aus, die Ausgabe sagt aber „Automatische Wiederherstellung". Die Meldung „Bitte Fox-Nummer über CLI ändern" ist im Fehlerzustand nicht umsetzbar, weil es dort keine CLI gibt.
   - Ein Mismatch eines *einzelnen* Fremdgeräts legt den ganzen Verbund lahm.
   **Vorschlag:** Bei Mismatch den inkompatiblen Peer ignorieren und mit den kompatiblen weiterarbeiten. Bei Kollision deterministisch auflösen (z. B. höhere MAC gibt nach und meldet sich). Im Fehlerzustand direkt in die CLI springen. Nach N erfolglosen Versuchen in den Tiefschlaf gehen statt endlos neu zu starten.
+  **Erledigt:** Neue Fehlerbehandlung in [main.cpp](../src/main.cpp) `handleError()`: kein Senden, LED-Muster, die **CLI bleibt bedienbar** (Konfiguration korrigieren, Neustart über 11). Nach 60 s ohne Eingabe folgt ein Neuversuch per Neustart, aber nur bei Fehlern, die ein anderer Fuchs verursacht haben kann (Kollision, Abweichung, ESP-NOW-Start), und höchstens 5-mal (Zähler in `RTC_NOINIT`, zurückgesetzt bei Power-on/RST und erfolgreichem Start). Danach Tiefschlaf ohne Weckzeit bis zum Reset, damit der Akku geschont wird. Ein Tastendruck löst keinen Neustart mehr aus. **Bewusst beibehalten:** Bei einer Konfigurations-Abweichung sendet niemand, weil zwei unabhängige Raster auf derselben Frequenz kollidieren würden; Abhilfe gegen Fremdgeräte wäre die Gruppen-ID aus 8.3 (Erweiterung).
 
 - [x] **P1 – 3.3 Konfigurationsänderungen in der CLI wirken nicht auf den laufenden Sync**
   [cli.cpp:107-162](../src/cli.cpp#L107-L162), [main.cpp:101](../src/main.cpp#L101)
   `initSync()` läuft vor der CLI mit der alten Fox-ID und dem alten Profil. Wird beides in der CLI geändert, verschicken die Beacons weiter die alten Werte, und `prof` in `runStartupPhase` zeigt auf das alte Profil. Siehe auch 2.1. → 6.2.
   **Erledigt:** Durch 6.2 behoben: Geänderte Konfiguration wird erst nach einem Neustart aktiv, Sync und Startphase laufen also immer mit der aktuellen Konfiguration.
 
-- [ ] **P2 – 3.4 Startphase blockiert den Sync durch `delay()`**
+- [x] **P2 – 3.4 Startphase blockiert den Sync durch `delay()`**
   [main.cpp:138-148](../src/main.cpp#L138-L148), [cli.cpp:111-117](../src/cli.cpp#L111-L117)
   Das LED-Blinken mit `delay(500)` und die blockierenden Eingabeschleifen der Untermenüs (bis 30 s) halten `processSync()` an: keine Beacons, keine Regression. Andere Füchse halten diesen dann ggf. für weg (sobald 1.12 umgesetzt ist).
   **Fix:** LED per nicht-blockierender Zustandsmaschine (`millis()`-basiert) steuern, Untermenüs als Zustände in `cli::process()` umsetzen.
+  **Erledigt:** Neues Modul [led.cpp](../src/led.cpp) mit nicht-blockierenden Mustern (`led::update()`), die CLI ist ein Zustandsautomat ohne Warteschleifen. Die Startphase ruft CLI, Sync und LED pro Durchlauf ohne Blockade auf (`delay(5)`).
 
-- [ ] **P2 – 3.5 LED-Muster laut README sind nicht oder anders implementiert**
+- [x] **P2 – 3.5 LED-Muster laut README sind nicht oder anders implementiert**
   [tx_driver.cpp:138-157](../src/tx_driver.cpp#L138-L157), [main.cpp:137-148](../src/main.cpp#L137-L148)
   `blinkHeartbeat()` (2 Hz Boot/Sync), `blinkIdle()` und `blinkDutyBlocked()` werden nie aufgerufen. Da `cli_active` ab Boot `true` ist, zeigt die LED in der Startphase immer „500 ms an / ~1,5 s aus". Sync läuft und CLI aktiv sind nicht unterscheidbar.
+  **Erledigt:** Alle README-Muster implementiert und verwendet: 2 Hz während des Syncs, 0,5 Hz in der Startphase von Profil D, SOS bei Kollision, 3× kurz bei Abweichung/nicht im Slotplan, 10 Hz bei ungültiger Konfiguration/ESP-NOW-Fehler, 2× kurz bei Duty-Guard-Blockade. Die alten blockierenden `blink*()`-Funktionen sind entfernt.
 
-- [ ] **P2 – 3.6 Kleinere CLI-Fehler**
+- [x] **P2 – 3.6 Kleinere CLI-Fehler**
   - [cli.cpp:118](../src/cli.cpp#L118) `Serial.parseInt()` lässt CR/LF im Puffer, deshalb wird das Menü doppelt ausgegeben. `parseInt` akzeptiert außerdem „2abc".
   - [cli.cpp:179-204](../src/cli.cpp#L179-L204) Bei der Rufzeichen-Eingabe funktioniert Backspace nicht (das Zeichen landet im Puffer und wird als ungültig abgelehnt).
   - [cli.cpp:141-143](../src/cli.cpp#L141-L143) Bei der Profilwahl kommen die restlichen Zeichen eventuell erst nach dem Leeren an, der Effekt ist derselbe wie oben.
   - [cli.cpp:385-389](../src/cli.cpp#L385-L389) Die Werkseinstellungen setzen den RAM-Zustand von `timesync` nicht zurück (anders als Menüpunkt 8), und der laufende Sync behält die alten Werte.
   - [cli.cpp:355-358](../src/cli.cpp#L355-L358) / [time_sync.cpp:45](../src/time_sync.cpp#L45) „Letzte Aktualisierung vor x s" zählt nach dem Laden aus dem NVS ab Boot, obwohl die Werte von einem früheren Einsatz stammen.
+  **Erledigt:** Mit der Zustandsautomaten-CLI behoben: Fox-Nummer muss genau eine Ziffer 1..5 sein (kein `parseInt`), CR/LF/CRLF werden sauber als ein Zeilenende behandelt (kein doppeltes Menü), Backspace funktioniert in allen Eingaben, nicht druckbare Zeichen werden ignoriert. Werkseinstellungen setzen auch die laufende Zeitmessung zurück. Menüpunkt 7 zeigt die aktuelle Messung gegen den Master und getrennt davon die letzte gespeicherte Messung (ohne irreführendes „vor x s").
 
 - [ ] **P2 – 3.7 Konfiguration wird bei jedem Aufwachen aus dem NVS gelesen**
   [main.cpp:88](../src/main.cpp#L88)
@@ -217,8 +221,9 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 - [x] **P2 – 4.3 Doppelte Duty-Logik**
   `calculateEffectiveCycleMs()` und `checkDuty()` rechnen dasselbe zweimal; `calculateMinCycleMs()` existiert parallel dazu. Zu einer Funktion zusammenführen.
   **Erledigt:** `checkDuty()`/`calculateEffectiveCycleMs()` entfernt; der Zyklus kommt ausschließlich aus `schedule::computePlan()`, der Duty-Guard enthält nur noch Grenzwert, Mindestzyklus, Duty-Berechnung und den Laufzeit-Guard.
-- [ ] **P2 – 4.4 Globale `extern`-Kopplung zwischen `main.cpp` und `cli.cpp`**
+- [x] **P2 – 4.4 Globale `extern`-Kopplung zwischen `main.cpp` und `cli.cpp`**
   `g_config` und `g_start_normal_mode` sind globale Variablen. Besser: Die CLI bekommt eine Referenz auf die Konfiguration und meldet über einen Rückgabewert (`enum class CliResult { None, StartNormal, Reboot }`).
+  **Erledigt:** `g_config` ist `static` in `main.cpp`; die CLI erhält die Konfiguration per Referenz (`cli::init(cfg, mode)`) und meldet Start-/Neustartwunsch über `startRequested()`/`restartRequired()`. Kein `extern` mehr.
 - [x] **P2 – 4.5 Hardware-Abstraktion für Tests**
   `morse.cpp` gibt im reinen Rechenpfad über `Serial` aus ([morse.cpp:105](../src/morse.cpp#L105)), und `duty_guard.cpp` bindet `Arduino.h` ein. Rechenlogik (Morse-Timing, Duty, Slotplan, Regression) in Arduino-freie Dateien trennen, damit sie nativ testbar wird (→ 5.1).
   **Erledigt:** Rechenlogik vollständig Arduino-frei: `morse.cpp`, `fox_profile.cpp`, `duty_guard.cpp`, `config_check.cpp`, `schedule.cpp`, `time_sync.cpp`, `sync_logic.cpp`. Hardware/Funk/NVS in `morse_tx.cpp`, `sync_espnow.cpp`, `config_store.cpp`, `time_correction_store.cpp`, `tx_driver.cpp`.
@@ -282,13 +287,16 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   Eine im Ton-Takt blinkende LED verrät einen versteckten Fuchs und kostet Strom. Option „LED: aus / nur Startphase / immer".
 - [ ] **P2 – 6.5 Skriptbare Befehle zusätzlich zum Nummernmenü**
   Z. B. `fox 3`, `profil c`, `call DL1ABC`, `status`, `start`, `reboot`, optional `status json`. Erleichtert die Bedienung, automatisierte Tests und eine Web-UI. Die Menünummern 10/11 sind fehleranfällig (Tippfehler „1" + Enter statt „10").
-- [ ] **P2 – 6.6 Im Fehlerzustand die CLI öffnen**
+- [x] **P2 – 6.6 Im Fehlerzustand die CLI öffnen**
   Statt SOS-Blinken plus Neustart sollte die CLI in den Fehlerzuständen erreichbar bleiben. Die Meldung „Fox-Nummer über CLI ändern" ist sonst nicht umsetzbar (siehe 3.2).
+  **Erledigt:** Im Fehlerzustand startet die CLI im Modus `Error`: Menü, Konfiguration ändern, Neustart (11); Menüpunkt 10 erklärt, warum er gesperrt ist.
 - [ ] **P2 – 6.7 Testaussendung**
   `docs/cli.md` schließt einen Testmodus ausdrücklich aus. Für den Aufbau im Gelände ist eine einzelne, duty-konforme Testaussendung („T) Kennung einmal senden") aber sehr hilfreich, ebenso eine Option „Peilempfänger-Check".
-- [ ] **P3 – 6.8 Untermenü-Timeouts** (10 s) sind knapp. Eine Zeitüberschreitung sollte mit „Abgebrochen, Wert unverändert" klar gemeldet werden.
-- [ ] **P3 – 6.9 Profil D: Hinweis auf den Reset**
+- [x] **P3 – 6.8 Untermenü-Timeouts** (10 s) sind knapp. Eine Zeitüberschreitung sollte mit „Abgebrochen, Wert unverändert" klar gemeldet werden.
+  **Erledigt:** Rückfragen haben 30 s Zeit (`CLI_PROMPT_TIMEOUT_MS`); bei Zeitüberschreitung oder ungültiger Eingabe meldet die CLI „abgebrochen, Wert unverändert".
+- [x] **P3 – 6.9 Profil D: Hinweis auf den Reset**
   Wegen des 2,2-s-Deep-Sleep ist die CLI nur nach dem Drücken der RST-Taste erreichbar. In der CLI-Startmeldung und in der README sichtbar erwähnen.
+  **Erledigt:** Die CLI-Startmeldung in Profil D weist darauf hin, dass die CLI im Betrieb nur nach Reset (RST) erreichbar ist.
 - [ ] **P3 – 6.10 Sonderzeichen in der Ausgabe** (`–`, `…`, `µ`, Umlaute)
   Manche Terminals (PuTTY mit Standard-Codepage, Arduino Serial Monitor älterer Versionen) zeigen sie falsch an. Entweder auf ASCII beschränken oder UTF-8 als Voraussetzung dokumentieren.
 

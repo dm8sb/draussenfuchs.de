@@ -24,12 +24,23 @@
 #include "schedule.h"
 #include "sync_espnow.h"
 #include "cli.h"
+#include "led.h"
 #include <esp_sleep.h>
+#include <esp_system.h>
 #include <driver/gpio.h>
 
-// ---- Globale Konfiguration ----
-FoxConfig g_config;
-bool g_start_normal_mode = false;
+// ---- Konfiguration ----
+static FoxConfig g_config;
+
+// ---- Fehler-Neuversuche: überleben esp_restart(), nicht aber Power-on/RST ----
+static constexpr uint32_t RETRY_MAGIC = 0xA5D1F0C5;
+RTC_NOINIT_ATTR static uint32_t retry_magic;
+RTC_NOINIT_ATTR static uint8_t  retry_count;
+
+static void resetRetries() {
+    retry_magic = RETRY_MAGIC;
+    retry_count = 0;
+}
 
 // ---- Fehlerzustände ----
 enum ErrorState : uint8_t {
@@ -78,9 +89,14 @@ void setup() {
     }
 
     // Erster Boot oder Reset
-    delay(500); // USB-CDC Stabilisierung
+    delay(USB_CDC_SETTLE_MS);
     Serial.println();
     Serial.printf(LOG_FOX "ARDF-Fuchsjagd-Sender v%s – Boot\n", ARDF_VERSION);
+
+    // Neuversuche zählen nur über Software-Neustarts hinweg
+    if (retry_magic != RETRY_MAGIC || esp_reset_reason() != ESP_RST_SW) {
+        resetRetries();
+    }
 
     ardf::config::loadConfig(g_config);
 
@@ -99,15 +115,19 @@ static void runStartupPhase() {
     const ardf::FoxProfile& prof = ardf::getProfile(g_config.profile_id);
 
     bool sync_ok = ardf::sync::initSync(g_config);
-    ardf::cli::init();
+    ardf::cli::init(g_config, ardf::cli::Mode::Startup);
     if (!sync_ok) {
         handleError(ERR_SYNC_INIT);
         return;
     }
 
-    // Hauptschleife der Startphase
+    // LED: 2 Hz während des Syncs, 0,5 Hz in der Startphase von Profil D
+    ardf::led::set(prof.use_espnow ? ardf::led::Pattern::Sync : ardf::led::Pattern::Idle);
+
+    // Hauptschleife der Startphase (nichts davon blockiert)
     while (true) {
         ardf::cli::process();
+        ardf::led::update();
 
         if (prof.use_espnow) {
             // ARDF: Der Sendebeginn ergibt sich aus dem Slotplan des Masters
@@ -121,7 +141,7 @@ static void runStartupPhase() {
             }
         } else {
             // Profil D: Start per Menüpunkt 10 oder Inaktivitäts-Timeout
-            if (g_start_normal_mode) break;
+            if (ardf::cli::startRequested()) break;
             if (ardf::cli::isTimedOut()) {
                 Serial.println();
                 Serial.println(LOG_CLI "Inaktivitäts-Timeout – Normalbetrieb wird gestartet");
@@ -129,21 +149,9 @@ static void runStartupPhase() {
             }
         }
 
-        // LED-Herzschlag (Boot/Sync)
-        if (ardf::cli::isActive()) {
-            // CLI aktiv: langsames Blinken
-            static uint64_t last_blink = 0;
-            uint64_t now = esp_timer_get_time();
-            if (now - last_blink > 2000000ULL) { // 2 s
-                ardf::tx::ledOn();
-                delay(500);
-                ardf::tx::ledOff();
-                last_blink = now;
-            }
-        }
-
-        delay(10);
+        delay(5);
     }
+    ardf::led::set(ardf::led::Pattern::Off);
 
     // Geänderte Konfiguration nie mit veraltetem Sync-Zustand senden
     if (ardf::cli::restartRequired()) {
@@ -158,6 +166,7 @@ static void runStartupPhase() {
     }
 
     if (!prof.use_espnow) {
+        resetRetries();
         runSoloMode();
         return;
     }
@@ -178,6 +187,7 @@ static void runStartupPhase() {
     }
 
     ardf::sync::finishSync();
+    resetRetries();
     runArdfMode();
 }
 
@@ -190,8 +200,9 @@ static void waitUntil(uint64_t target_us) {
         if (now >= target_us) return;
         uint64_t remaining_us = target_us - now;
         if (remaining_us > 3000) {
+            ardf::led::update();
             uint64_t ms = (remaining_us - 2000) / 1000;
-            delay(ms > 100 ? 100 : (uint32_t)ms);
+            delay(ms > 50 ? 50 : (uint32_t)ms);
         }
         // letzte 2–3 ms aktiv warten
     }
@@ -260,7 +271,9 @@ static void runArdfMode() {
             // Letzte Instanz: sollte bei korrektem Slotplan nie greifen
             Serial.printf(LOG_ERR "Duty-Guard: Sendung blockiert (Freigabe in %lu ms)\n",
                           (unsigned long)((guard.nextAllowedUs() - tx_start) / 1000));
+            ardf::led::set(ardf::led::Pattern::DutyBlocked);
         } else {
+            ardf::led::set(ardf::led::Pattern::Off);   // LED folgt jetzt dem Ton
             guard.record(tx_start, tx_ms, send_callsign);
             if (send_callsign) {
                 Serial.printf(LOG_FOX "AFU-Slot: Rufzeichen %s wird gesendet\n", g_config.callsign);
@@ -308,7 +321,7 @@ static void runSoloMode() {
 }
 
 // ============================================================================
-// Deep-Sleep (Profil D)
+// Deep-Sleep (Profil D); sleep_us = 0: ohne Weckzeit, nur Reset weckt auf
 // ============================================================================
 static void enterDeepSleep(uint64_t sleep_us) {
     // Sicherstellen, dass TX aus ist
@@ -331,19 +344,23 @@ static void enterDeepSleep(uint64_t sleep_us) {
     gpio_hold_en((gpio_num_t)TX_VCC_EN_PIN);
     gpio_deep_sleep_hold_en();
 
-    // Minimale Sleep-Zeit: 10 ms
-    if (sleep_us < 10000ULL) sleep_us = 10000ULL;
-
-    esp_sleep_enable_timer_wakeup(sleep_us);
+    if (sleep_us > 0) {
+        // Minimale Sleep-Zeit: 10 ms
+        if (sleep_us < 10000ULL) sleep_us = 10000ULL;
+        esp_sleep_enable_timer_wakeup(sleep_us);
+    }
     esp_deep_sleep_start();
 }
 
 // ============================================================================
 // Fehlerbehandlung
 // ============================================================================
+// Kein Senden. LED-Muster zeigt den Fehler, die CLI bleibt bedienbar. Nach
+// ERROR_RECOVERY_MS ohne Eingabe: Neuversuch per Neustart (nur bei Fehlern,
+// die ein anderer Fuchs verursacht haben kann), höchstens MAX_ERROR_RETRIES-mal.
+// Danach Tiefschlaf bis zum Reset, damit der Akku nicht leergezogen wird.
 static void handleError(ErrorState error) {
     const ardf::sync::Network& net = ardf::sync::network();
-    uint64_t error_end_us = esp_timer_get_time() + (uint64_t)ERROR_RECOVERY_MS * 1000ULL;
 
     switch (error) {
         case ERR_FOX_COLLISION:
@@ -375,20 +392,44 @@ static void handleError(ErrorState error) {
 
     ardf::sync::finishSync();
 
-    while (esp_timer_get_time() < error_end_us) {
-        switch (error) {
-            case ERR_FOX_COLLISION:   ardf::tx::blinkSos();      break;
-            case ERR_CONFIG_MISMATCH:
-            case ERR_NOT_IN_PLAN:     ardf::tx::blinkMismatch(); break;
-            default:                  ardf::tx::blinkInvalid();  break;
-        }
-        // CLI-Eingabe prüfen (für Neustart)
-        if (Serial.available()) break;
-        yield();
+    switch (error) {
+        case ERR_FOX_COLLISION:   ardf::led::set(ardf::led::Pattern::Sos);      break;
+        case ERR_CONFIG_MISMATCH:
+        case ERR_NOT_IN_PLAN:     ardf::led::set(ardf::led::Pattern::Mismatch); break;
+        default:                  ardf::led::set(ardf::led::Pattern::Invalid);  break;
     }
 
-    // Auto-Recovery nach 60 s
-    Serial.println(LOG_ERR "Automatische Wiederherstellung – Neustart in 3…2…1");
-    delay(3000);
-    esp_restart();
+    // Neuversuch nur, wenn ein anderer Fuchs die Ursache sein kann. Ein
+    // Nachzügler würde nach einem Neustart allein (unsynchronisiert) senden.
+    bool retryable = (error == ERR_FOX_COLLISION || error == ERR_CONFIG_MISMATCH ||
+                      error == ERR_SYNC_INIT);
+
+    ardf::cli::init(g_config, ardf::cli::Mode::Error);
+    uint64_t error_start_us = esp_timer_get_time();
+    while (true) {
+        ardf::cli::process();
+        ardf::led::update();
+        uint64_t last_us = ardf::cli::lastActivityUs();
+        if (last_us < error_start_us) last_us = error_start_us;
+        if (esp_timer_get_time() - last_us > (uint64_t)ERROR_RECOVERY_MS * 1000ULL) break;
+        delay(10);
+    }
+
+    if (ardf::cli::restartRequired()) {
+        Serial.println(LOG_CLI "Konfiguration geändert – Neustart");
+        resetRetries();
+        delay(500);
+        esp_restart();
+    }
+    if (retryable && retry_count < MAX_ERROR_RETRIES) {
+        retry_count++;
+        Serial.printf(LOG_ERR "Neuer Versuch %u von %u – Neustart\n", retry_count, MAX_ERROR_RETRIES);
+        delay(500);
+        esp_restart();
+    }
+
+    Serial.println(LOG_ERR "Fehler besteht weiter – Tiefschlaf. Neustart mit der RST-Taste");
+    Serial.flush();
+    ardf::led::set(ardf::led::Pattern::Off);
+    enterDeepSleep(0);
 }

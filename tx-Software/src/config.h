@@ -57,6 +57,8 @@ constexpr float    DUTY_SAFETY_FACTOR       = 1.05f;   // 5 % Sicherheitsaufschl
 
 // ---- CLI ----
 constexpr uint32_t CLI_TIMEOUT_PROFILD_MS   = 30000;   // 30 s Auto-Start (Profil D)
+constexpr uint32_t CLI_PROMPT_TIMEOUT_MS    = 30000;   // Rückfragen ohne Antwort abbrechen
+constexpr uint32_t USB_CDC_SETTLE_MS        = 500;     // USB-CDC nach Kaltstart stabilisieren
 
 // ---- Zeitkorrektur ----
 // Quarz-Toleranz zweier Boards: zusammen deutlich unter 100 ppm; größere
@@ -70,7 +72,8 @@ constexpr uint32_t TIME_OUTLIER_MIN_US      = 500;     // Mindest-Ausreißergren
 constexpr uint16_t TX_WARMUP_MS             = 20;      // 20 ms Oszillator-Einschwingzeit
 
 // ---- Fehler-Erholung ----
-constexpr uint32_t ERROR_RECOVERY_MS        = 60000;   // 60 s bis Auto-Neustart
+constexpr uint32_t ERROR_RECOVERY_MS        = 60000;   // 60 s ohne Eingabe bis Neuversuch
+constexpr uint8_t  MAX_ERROR_RETRIES        = 5;       // danach Tiefschlaf bis Reset
 
 // ---- Profil-IDs ----
 constexpr uint8_t  PROFILE_A_ID             = 0;  // ISM-Standard

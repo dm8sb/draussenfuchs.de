@@ -5,6 +5,10 @@
 // ============================================================================
 // cli.cpp – Serielle Kommandozeile Implementierung
 // ============================================================================
+//
+// Nicht blockierend: Eingaben werden zeichenweise in einen Zeilenpuffer gelesen
+// und bei Enter ausgewertet. Rückfragen (Fox-Nummer, Profil, …) sind Zustände
+// mit Zeitüberschreitung, damit Sync und LED währenddessen weiterlaufen.
 
 #include "cli.h"
 #include "config.h"
@@ -15,42 +19,74 @@
 #include "schedule.h"
 #include "sync_espnow.h"
 #include "time_correction_store.h"
-#include "tx_driver.h"
 #include <Arduino.h>
 #include <cstring>
-
-// Externer Zugriff auf die globale Konfiguration (in main.cpp definiert)
-extern FoxConfig g_config;
-extern bool g_start_normal_mode;
 
 namespace ardf {
 namespace cli {
 
 // ---- Interner Zustand ----
+enum class State : uint8_t {
+    Idle,             // Menü noch nicht angezeigt
+    Menu,             // Menüauswahl
+    AwaitFox,         // Rückfrage Fox-Nummer
+    AwaitProfile,     // Rückfrage Profil
+    AwaitCallsign,    // Rückfrage Rufzeichen
+    AwaitFactory,     // Bestätigung Werkseinstellungen
+    AwaitRestart      // Rückfrage Neustart nach Änderung
+};
+
+static FoxConfig* cfg_ = nullptr;
+static Mode mode = Mode::Startup;
+static State state = State::Idle;
 static bool cli_active = false;
-static uint64_t last_activity_us = 0;
-static char input_buffer[64];
-static uint8_t input_pos = 0;
-static bool menu_shown = false;
+static bool start_requested = false;
 static bool restart_required = false;
+static uint64_t last_activity_us = 0;
+static uint64_t prompt_start_us = 0;
 
-void init() {
+static char line[32];
+static uint8_t line_len = 0;
+static bool last_was_cr = false;
+
+static void showMenu();
+
+static void printMac(const uint8_t* m) {
+    Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+
+static void prompt(State s, const char* text) {
+    state = s;
+    prompt_start_us = esp_timer_get_time();
+    Serial.print(text);
+}
+
+void init(FoxConfig& cfg, Mode m) {
+    cfg_ = &cfg;
+    mode = m;
+    state = State::Idle;
     cli_active = true;
+    start_requested = false;
     last_activity_us = esp_timer_get_time();
-    input_pos = 0;
-    menu_shown = false;
+    line_len = 0;
 
-    const FoxProfile& prof = getProfile(g_config.profile_id);
+    const FoxProfile& prof = getProfile(cfg.profile_id);
 
     Serial.println();
+    if (mode == Mode::Error) {
+        Serial.println(LOG_CLI "Enter drücken für das Menü: Konfiguration prüfen bzw. ändern,");
+        Serial.println(LOG_CLI "danach neu starten (Menüpunkt 11).");
+        Serial.println();
+        return;
+    }
+
     Serial.println("=========================================");
     Serial.printf( "  ARDF-Fuchsjagd-Sender v%s\n", ARDF_VERSION);
     Serial.println("=========================================");
     Serial.printf( LOG_FOX "Fox-ID: %u | Profil: %c (%s)\n",
-                  g_config.fox_id, getProfileChar(g_config.profile_id),
-                  getProfile(g_config.profile_id).description);
-    if (g_config.callsign[0] != '\0') {
-        Serial.printf(LOG_FOX "Rufzeichen: %s (AFU-Modus)\n", g_config.callsign);
+                  cfg.fox_id, getProfileChar(cfg.profile_id), prof.description);
+    if (cfg.callsign[0] != '\0') {
+        Serial.printf(LOG_FOX "Rufzeichen: %s (AFU-Modus)\n", cfg.callsign);
     }
     Serial.println();
     if (prof.use_espnow) {
@@ -61,17 +97,13 @@ void init() {
     } else {
         Serial.printf(LOG_CLI "Enter drücken für Konfigurationsmenü (Auto-Start in %lu s)\n",
                       (unsigned long)(CLI_TIMEOUT_PROFILD_MS / 1000));
+        Serial.println(LOG_CLI "Hinweis: Im Betrieb ist die CLI nur nach Reset (RST) erreichbar");
     }
     Serial.println();
 }
 
-// Warten in Eingabeschleifen: Synchronisation weiter bedienen
-static void waitTick() {
-    sync::processSync();
-    delay(1);
-}
-
-void showMenu() {
+static void showMenu() {
+    state = State::Menu;
     Serial.println();
     Serial.println("ARDF-Fuchsjagd-Sender – Konfiguration");
     Serial.println("-------------------------------------");
@@ -84,12 +116,13 @@ void showMenu() {
     Serial.println(" 7) Zeitkorrekturwerte anzeigen");
     Serial.println(" 8) Zeitkorrekturwerte löschen");
     Serial.println(" 9) Werkseinstellungen laden");
-    Serial.println("10) Normalbetrieb starten und CLI verlassen");
+    if (mode == Mode::Startup) {
+        Serial.println("10) Normalbetrieb starten und CLI verlassen");
+    }
     Serial.println("11) Neustart");
     Serial.println(" h) Hilfe");
     Serial.println();
     Serial.print("> ");
-    menu_shown = true;
 }
 
 // ---- Interne Befehle ----
@@ -99,189 +132,31 @@ void showMenu() {
 static void requireRestart() {
     restart_required = true;
     Serial.println(LOG_WARN "Änderung wird erst nach einem Neustart wirksam.");
-    Serial.print("Jetzt neu starten? (J/N): ");
-
-    uint64_t start = esp_timer_get_time();
-    while (!Serial.available()) {
-        if (esp_timer_get_time() - start > 10000000ULL) {
-            Serial.println("\nKein Neustart – bitte später Menüpunkt 11 wählen");
-            return;
-        }
-        waitTick();
-    }
-    char c = Serial.read();
-    while (Serial.available()) Serial.read();
-    Serial.println(c);
-
-    if (c == 'J' || c == 'j') {
-        Serial.println(LOG_WARN "Neustart wird ausgeführt...");
-        delay(500);
-        esp_restart();
-    }
-    Serial.println("Kein Neustart – Normalbetrieb bis zum Neustart gesperrt (Menüpunkt 11)");
+    prompt(State::AwaitRestart, "Jetzt neu starten? (J/N): ");
 }
 
 static void cmdShowConfig() {
+    const FoxConfig& cfg = *cfg_;
+    const FoxProfile& prof = getProfile(cfg.profile_id);
     Serial.println();
     Serial.println("=== Aktuelle Konfiguration ===");
-    Serial.printf("Fox-ID:      %u\n", g_config.fox_id);
-    Serial.printf("Profil:      %c – %s\n",
-                  getProfileChar(g_config.profile_id),
-                  getProfile(g_config.profile_id).description);
+    Serial.printf("Fox-ID:      %u (%s)\n", cfg.fox_id, morse::getMoCallsign(cfg.fox_id));
+    Serial.printf("Profil:      %c – %s\n", prof.name, prof.description);
     Serial.printf("Rufzeichen:  %s\n",
-                  (g_config.callsign[0] != '\0') ? g_config.callsign : "(leer – ISM-Modus)");
-    Serial.printf("Ton:         %u Hz\n", FOX_TONE_HZ[g_config.fox_id - 1]);
-
-    const FoxProfile& prof = getProfile(g_config.profile_id);
-    Serial.printf("Zyklus:      %lu ms\n", (unsigned long)prof.cycle_ms);
-    Serial.printf("Slot:        %lu ms\n", (unsigned long)prof.slot_ms);
+                  (cfg.callsign[0] != '\0') ? cfg.callsign : "(leer – ISM-Modus)");
+    Serial.printf("Ton:         %u Hz\n", FOX_TONE_HZ[cfg.fox_id - 1]);
+    Serial.printf("Zyklus:      %lu ms (Profilwert, siehe Menüpunkt 5/6)\n",
+                  (unsigned long)prof.cycle_ms);
+    Serial.printf("Slot:        %lu ms (Profilwert)\n", (unsigned long)prof.slot_ms);
     Serial.printf("WPM:         %u\n", prof.wpm);
     Serial.printf("Wiederh.:    %u\n", prof.morse_repeats);
     Serial.printf("ESP-NOW:     %s\n", prof.use_espnow ? "Ja" : "Nein");
     Serial.printf("Dauerton:    %s\n", prof.is_continuous ? "Ja" : "Nein");
     Serial.printf("Version:     %s\n", ARDF_VERSION);
+    if (restart_required) {
+        Serial.println(LOG_WARN "Geänderte Konfiguration – Neustart ausstehend");
+    }
     Serial.println();
-}
-
-static void cmdChangeFoxId() {
-    Serial.print("Neue Fox-Nummer (1..5): ");
-    // Warte auf Eingabe (mit Timeout)
-    uint64_t start = esp_timer_get_time();
-    while (!Serial.available()) {
-        if (esp_timer_get_time() - start > 10000000ULL) { // 10 s Timeout
-            Serial.println("\nZeitüberschreitung");
-            return;
-        }
-        waitTick();
-    }
-    int val = Serial.parseInt();
-    Serial.println(val);
-
-    if (val >= 1 && val <= MAX_FOXES) {
-        g_config.fox_id = (uint8_t)val;
-        config::saveConfig(g_config);
-        Serial.printf(LOG_CFG "Fox-Nummer auf %u geändert (Ton: %u Hz)\n",
-                      g_config.fox_id, FOX_TONE_HZ[g_config.fox_id - 1]);
-        requireRestart();
-    } else {
-        Serial.println(LOG_ERR "Ungültige Fox-Nummer (erlaubt: 1..5)");
-    }
-}
-
-static void cmdChangeProfile() {
-    Serial.print("Neues Profil (A/B/C/D): ");
-    uint64_t start = esp_timer_get_time();
-    while (!Serial.available()) {
-        if (esp_timer_get_time() - start > 10000000ULL) {
-            Serial.println("\nZeitüberschreitung");
-            return;
-        }
-        waitTick();
-    }
-    char c = Serial.read();
-    // Restliche Zeichen konsumieren
-    while (Serial.available()) Serial.read();
-    Serial.println(c);
-
-    uint8_t id = getProfileIdByChar(c);
-    if (id == 0xFF) {
-        Serial.println(LOG_ERR "Ungültiges Profil (erlaubt: A, B, C, D)");
-        return;
-    }
-
-    g_config.profile_id = id;
-    config::saveConfig(g_config);
-
-    const FoxProfile& prof = getProfile(id);
-    Serial.printf(LOG_CFG "Profil auf %c geändert: %s\n", prof.name, prof.description);
-
-    if (id == PROFILE_D_ID) {
-        Serial.println(LOG_WARN "Profil D: Solo-Modus ohne ARDF-Synchronisation");
-        Serial.println(LOG_WARN "Fox-spezifischer Dauerton, kein ESP-NOW");
-    }
-    requireRestart();
-}
-
-static void cmdChangeCallsign() {
-    Serial.println("Aktuelles Rufzeichen: ");
-    if (g_config.callsign[0] != '\0') {
-        Serial.printf("  %s\n", g_config.callsign);
-    } else {
-        Serial.println("  (leer – ISM-Modus)");
-    }
-    Serial.println("Neues Rufzeichen eingeben (leer = löschen): ");
-    Serial.print("> ");
-
-    uint64_t start = esp_timer_get_time();
-    char buf[CALLSIGN_MAX_LEN + 2];
-    uint8_t pos = 0;
-    memset(buf, 0, sizeof(buf));
-
-    while (true) {
-        if (esp_timer_get_time() - start > 30000000ULL) { // 30 s Timeout
-            Serial.println("\nZeitüberschreitung");
-            return;
-        }
-        if (!Serial.available()) {
-            waitTick();
-            continue;
-        }
-        char c = Serial.read();
-        if (c == '\r' || c == '\n') {
-            // CR oder LF → Eingabe abschließen
-            // Restliche CR/LF konsumieren
-            delay(10);
-            while (Serial.available()) {
-                char x = Serial.peek();
-                if (x == '\r' || x == '\n') Serial.read();
-                else break;
-            }
-            break;
-        }
-        if (pos < CALLSIGN_MAX_LEN) {
-            buf[pos++] = c;
-            Serial.print(c);
-        }
-    }
-    buf[pos] = '\0';
-    Serial.println();
-
-    // Löschen?
-    if (pos == 0) {
-        memset(g_config.callsign, 0, sizeof(g_config.callsign));
-        config::saveConfig(g_config);
-        Serial.println(LOG_CFG "Rufzeichen gelöscht – ISM-Modus aktiv");
-        requireRestart();
-        return;
-    }
-
-    // Großbuchstaben-Konvertierung
-    for (uint8_t i = 0; i < pos; i++) {
-        if (buf[i] >= 'a' && buf[i] <= 'z') buf[i] = buf[i] - 'a' + 'A';
-    }
-
-    // Validierung
-    for (uint8_t i = 0; i < pos; i++) {
-        char ch = buf[i];
-        if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
-              ch == '/' || ch == '-' || ch == '.')) {
-            Serial.printf(LOG_ERR "Ungültiges Zeichen '%c' – erlaubt: A-Z 0-9 / - .\n", ch);
-            return;
-        }
-    }
-
-    // Übernehmen
-    memset(g_config.callsign, 0, sizeof(g_config.callsign));
-    strncpy(g_config.callsign, buf, CALLSIGN_MAX_LEN);
-    config::saveConfig(g_config);
-
-    Serial.printf(LOG_CFG "Rufzeichen gesetzt: %s\n", g_config.callsign);
-    Serial.println(LOG_WARN "Rufzeichen nur für AFU-Betrieb verwenden; im ISM-Betrieb leer lassen.");
-    requireRestart();
-}
-
-static void printMac(const uint8_t* m) {
-    Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
 static void printPlan(const schedule::CyclePlan& plan, int8_t own_idx) {
@@ -296,20 +171,20 @@ static void printPlan(const schedule::CyclePlan& plan, int8_t own_idx) {
 }
 
 static void cmdDutyCycle() {
+    const FoxConfig& cfg = *cfg_;
+    const FoxProfile& prof = getProfile(cfg.profile_id);
+    const bool afu = (cfg.callsign[0] != '\0');
+    uint32_t tx_total = txBudgetMs(cfg.profile_id, cfg.fox_id, nullptr);
+
     Serial.println();
     Serial.println("=== Duty-Cycle-Berechnung ===");
-
-    const FoxProfile& prof = getProfile(g_config.profile_id);
-    const bool afu = (g_config.callsign[0] != '\0');
-    uint32_t tx_total = txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
-
-    Serial.printf("Fox-ID:    %u (%s)\n", g_config.fox_id, morse::getMoCallsign(g_config.fox_id));
+    Serial.printf("Fox-ID:    %u (%s)\n", cfg.fox_id, morse::getMoCallsign(cfg.fox_id));
     Serial.printf("Profil:    %c\n", prof.name);
-    Serial.printf("Ton:       %u Hz\n", FOX_TONE_HZ[g_config.fox_id - 1]);
+    Serial.printf("Ton:       %u Hz\n", FOX_TONE_HZ[cfg.fox_id - 1]);
 
     if (prof.is_continuous) {
-        schedule::FoxTiming own = {g_config.fox_id, tx_total, tx_total};
-        schedule::CyclePlan plan = schedule::computePlan(g_config.profile_id, &own, 1);
+        schedule::FoxTiming own = {cfg.fox_id, tx_total, tx_total};
+        schedule::CyclePlan plan = schedule::computePlan(cfg.profile_id, &own, 1);
         Serial.printf("TX-AN:     %u ms (+ %u ms Vorlauf)\n", prof.tone_on_ms, TX_WARMUP_MS);
         Serial.printf("TX-AUS:    %lu ms\n", (unsigned long)(plan.cycle_ms - tx_total));
         Serial.printf("Zyklus:    %lu ms\n", (unsigned long)plan.cycle_ms);
@@ -319,7 +194,7 @@ static void cmdDutyCycle() {
         return;
     }
 
-    uint32_t tone_on = morse::calculateMoToneOnTimeMs(g_config.fox_id, prof.wpm, prof.morse_repeats);
+    uint32_t tone_on = morse::calculateMoToneOnTimeMs(cfg.fox_id, prof.wpm, prof.morse_repeats);
     Serial.printf("WPM:       %u\n", prof.wpm);
     Serial.printf("Wiederh.:  %u\n", prof.morse_repeats);
     Serial.printf("Ton-AN:    %lu ms\n", (unsigned long)tone_on);
@@ -327,7 +202,7 @@ static void cmdDutyCycle() {
                   (unsigned long)tx_total);
     if (afu) {
         Serial.printf("TX-Budget im Rufzeichen-Slot: %lu ms\n",
-                      (unsigned long)txBudgetMs(g_config.profile_id, g_config.fox_id, g_config.callsign));
+                      (unsigned long)txBudgetMs(cfg.profile_id, cfg.fox_id, cfg.callsign));
     }
 
     // Ungünstigster Fall für n aktive Füchse: eigener Fuchs + die längsten
@@ -339,15 +214,14 @@ static void cmdDutyCycle() {
     for (uint8_t n = 1; n <= MAX_FOXES; n++) {
         schedule::FoxTiming foxes[MAX_FOXES];
         uint8_t count = 0;
-        foxes[count++] = {g_config.fox_id, tx_total,
-                          txBudgetMs(g_config.profile_id, g_config.fox_id,
-                                     afu ? g_config.callsign : nullptr)};
+        foxes[count++] = {cfg.fox_id, tx_total,
+                          txBudgetMs(cfg.profile_id, cfg.fox_id, afu ? cfg.callsign : nullptr)};
         for (uint8_t id = MAX_FOXES; id >= 1 && count < n; id--) {
-            if (id == g_config.fox_id) continue;
-            foxes[count++] = {id, txBudgetMs(g_config.profile_id, id, nullptr),
-                              txBudgetMs(g_config.profile_id, id, afu ? g_config.callsign : nullptr)};
+            if (id == cfg.fox_id) continue;
+            foxes[count++] = {id, txBudgetMs(cfg.profile_id, id, nullptr),
+                              txBudgetMs(cfg.profile_id, id, afu ? cfg.callsign : nullptr)};
         }
-        schedule::CyclePlan plan = schedule::computePlan(g_config.profile_id, foxes, count);
+        schedule::CyclePlan plan = schedule::computePlan(cfg.profile_id, foxes, count);
         Serial.printf("  %u     %6lu ms  %6lu ms  %5.1f%%  %s\n",
                       n, (unsigned long)plan.cycle_ms, (unsigned long)plan.slot_ms,
                       duty::calculateDutyPercent(plan.tx_norm_ms, plan.cycle_ms),
@@ -361,7 +235,11 @@ static void cmdSyncStatus() {
     Serial.println("=== Sync-Status ===");
 
     if (!sync::isActive()) {
-        Serial.println("ESP-NOW deaktiviert (Profil D: Solo-Modus)");
+        if (getProfile(cfg_->profile_id).use_espnow) {
+            Serial.println("ESP-NOW nicht aktiv");
+        } else {
+            Serial.println("ESP-NOW deaktiviert (Profil D: Solo-Modus)");
+        }
         Serial.println();
         return;
     }
@@ -466,49 +344,25 @@ static void cmdClearTimeCorrection() {
     Serial.println(LOG_CFG "Zeitkorrekturwerte gelöscht, Messung beginnt neu");
 }
 
-static void cmdFactoryReset() {
-    Serial.println(LOG_WARN "Alle Einstellungen werden auf Werkseinstellungen zurückgesetzt!");
-    Serial.print("Bestätigung (J/N): ");
-
-    uint64_t start = esp_timer_get_time();
-    while (!Serial.available()) {
-        if (esp_timer_get_time() - start > 10000000ULL) {
-            Serial.println("\nAbgebrochen");
-            return;
-        }
-        waitTick();
-    }
-    char c = Serial.read();
-    while (Serial.available()) Serial.read();
-    Serial.println(c);
-
-    if (c == 'J' || c == 'j') {
-        config::eraseAllNvs();
-        config::resetToDefaults(g_config);
-        config::saveConfig(g_config);
-        sync::resetTimeModel();
-        Serial.println(LOG_CFG "Werkseinstellungen geladen und gespeichert");
-        requireRestart();
-    } else {
-        Serial.println("Abgebrochen");
-    }
-}
-
 static void cmdStartNormal() {
+    if (mode == Mode::Error) {
+        Serial.println(LOG_ERR "Im Fehlerzustand nicht möglich – Ursache beheben, dann neu starten (11)");
+        return;
+    }
     if (restart_required) {
         Serial.println(LOG_ERR "Konfiguration wurde geändert – erst neu starten (Menüpunkt 11)");
         return;
     }
 
+    const FoxConfig& cfg = *cfg_;
     Serial.println();
     if (!sync::isActive()) {
         // Profil D: sofort starten
         Serial.println("=== Normalbetrieb wird gestartet ===");
         Serial.printf(LOG_FOX "Fox-ID: %u | Profil: %c | Ton: %u Hz\n",
-                      g_config.fox_id, getProfileChar(g_config.profile_id),
-                      FOX_TONE_HZ[g_config.fox_id - 1]);
+                      cfg.fox_id, getProfileChar(cfg.profile_id), FOX_TONE_HZ[cfg.fox_id - 1]);
         cli_active = false;
-        g_start_normal_mode = true;
+        start_requested = true;
         return;
     }
 
@@ -528,9 +382,9 @@ static void cmdStartNormal() {
     Serial.printf(LOG_FOX "Sendebeginn in %.1f s – CLI wird beendet\n",
                   start > now ? (double)(start - now) / 1e6 : 0.0);
     printPlan(net.plan(), net.ownSlotIndex());
-    if (g_config.callsign[0] != '\0') {
+    if (cfg.callsign[0] != '\0') {
         Serial.printf(LOG_FOX "Rufzeichen: %s (AFU-Modus, alle %u Aussendungen)\n",
-                      g_config.callsign, CALLSIGN_SLOT_INTERVAL);
+                      cfg.callsign, CALLSIGN_SLOT_INTERVAL);
     }
     Serial.println();
     cli_active = false;
@@ -563,19 +417,22 @@ static void cmdHelp() {
     Serial.println();
 }
 
-// ---- Befehlsverarbeitung ----
-static void processCommand(const char* cmd) {
-    // Leerzeichen entfernen
-    while (*cmd == ' ') cmd++;
+// ---- Auswertung einer Eingabezeile ----
 
+static void handleMenu(const char* cmd) {
     if (strcmp(cmd, "1") == 0) {
         cmdShowConfig();
     } else if (strcmp(cmd, "2") == 0) {
-        cmdChangeFoxId();
+        prompt(State::AwaitFox, "Neue Fox-Nummer (1..5): ");
+        return;
     } else if (strcmp(cmd, "3") == 0) {
-        cmdChangeProfile();
+        prompt(State::AwaitProfile, "Neues Profil (A/B/C/D): ");
+        return;
     } else if (strcmp(cmd, "4") == 0) {
-        cmdChangeCallsign();
+        Serial.printf("Aktuelles Rufzeichen: %s\n",
+                      cfg_->callsign[0] != '\0' ? cfg_->callsign : "(leer – ISM-Modus)");
+        prompt(State::AwaitCallsign, "Neues Rufzeichen (leer = löschen): ");
+        return;
     } else if (strcmp(cmd, "5") == 0) {
         cmdDutyCycle();
     } else if (strcmp(cmd, "6") == 0) {
@@ -585,73 +442,188 @@ static void processCommand(const char* cmd) {
     } else if (strcmp(cmd, "8") == 0) {
         cmdClearTimeCorrection();
     } else if (strcmp(cmd, "9") == 0) {
-        cmdFactoryReset();
+        Serial.println(LOG_WARN "Alle Einstellungen werden auf Werkseinstellungen zurückgesetzt!");
+        prompt(State::AwaitFactory, "Bestätigung (J/N): ");
+        return;
     } else if (strcmp(cmd, "10") == 0) {
-        cmdStartNormal(); // beendet die CLI, außer ein Neustart steht aus
+        cmdStartNormal();   // beendet die CLI, außer etwas spricht dagegen
     } else if (strcmp(cmd, "11") == 0) {
         cmdReboot();
     } else if (strcmp(cmd, "h") == 0 || strcmp(cmd, "H") == 0) {
         cmdHelp();
-    } else if (strlen(cmd) == 0) {
-        // Leere Eingabe (Enter) → Menü anzeigen
-    } else {
+    } else if (cmd[0] != '\0') {
         Serial.printf(LOG_ERR "Unbekannter Befehl: '%s'\n", cmd);
     }
+    if (cli_active) showMenu();
+}
 
-    if (cli_active) {
+static void handleFox(const char* in) {
+    FoxConfig& cfg = *cfg_;
+    // Genau eine Ziffer 1..5 (kein parseInt: „2abc" wird abgelehnt)
+    if (strlen(in) == 1 && in[0] >= '1' && in[0] <= '0' + MAX_FOXES) {
+        cfg.fox_id = (uint8_t)(in[0] - '0');
+        config::saveConfig(cfg);
+        Serial.printf(LOG_CFG "Fox-Nummer auf %u geändert (Ton: %u Hz)\n",
+                      cfg.fox_id, FOX_TONE_HZ[cfg.fox_id - 1]);
+        requireRestart();
+        return;
+    }
+    Serial.println(LOG_ERR "Ungültige Fox-Nummer (erlaubt: 1..5) – Wert unverändert");
+    showMenu();
+}
+
+static void handleProfile(const char* in) {
+    FoxConfig& cfg = *cfg_;
+    uint8_t id = (strlen(in) == 1) ? getProfileIdByChar(in[0]) : 0xFF;
+    if (id == 0xFF) {
+        Serial.println(LOG_ERR "Ungültiges Profil (erlaubt: A, B, C, D) – Wert unverändert");
         showMenu();
+        return;
+    }
+    cfg.profile_id = id;
+    config::saveConfig(cfg);
+
+    const FoxProfile& prof = getProfile(id);
+    Serial.printf(LOG_CFG "Profil auf %c geändert: %s\n", prof.name, prof.description);
+    if (id == PROFILE_D_ID) {
+        Serial.println(LOG_WARN "Profil D: Solo-Modus ohne ARDF-Synchronisation");
+        Serial.println(LOG_WARN "Fox-spezifischer Dauerton, kein ESP-NOW");
+    }
+    requireRestart();
+}
+
+static void handleCallsign(const char* in) {
+    FoxConfig& cfg = *cfg_;
+    size_t len = strlen(in);
+
+    if (len == 0) {
+        memset(cfg.callsign, 0, sizeof(cfg.callsign));
+        config::saveConfig(cfg);
+        Serial.println(LOG_CFG "Rufzeichen gelöscht – ISM-Modus aktiv");
+        requireRestart();
+        return;
+    }
+    if (len > CALLSIGN_MAX_LEN) {
+        Serial.printf(LOG_ERR "Rufzeichen zu lang (max. %u Zeichen) – Wert unverändert\n",
+                      CALLSIGN_MAX_LEN);
+        showMenu();
+        return;
+    }
+
+    char buf[CALLSIGN_MAX_LEN + 1];
+    for (size_t i = 0; i <= len; i++) {
+        char ch = in[i];
+        if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+        if (ch != '\0' && !((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                            ch == '/' || ch == '-' || ch == '.')) {
+            Serial.printf(LOG_ERR "Ungültiges Zeichen '%c' – erlaubt: A-Z 0-9 / - . "
+                          "– Wert unverändert\n", ch);
+            showMenu();
+            return;
+        }
+        buf[i] = ch;
+    }
+
+    memset(cfg.callsign, 0, sizeof(cfg.callsign));
+    memcpy(cfg.callsign, buf, len);
+    config::saveConfig(cfg);
+    Serial.printf(LOG_CFG "Rufzeichen gesetzt: %s\n", cfg.callsign);
+    Serial.println(LOG_WARN "Rufzeichen nur für AFU-Betrieb verwenden; im ISM-Betrieb leer lassen.");
+    requireRestart();
+}
+
+static void handleFactory(const char* in) {
+    if (strcmp(in, "J") == 0 || strcmp(in, "j") == 0) {
+        config::eraseAllNvs();
+        config::resetToDefaults(*cfg_);
+        config::saveConfig(*cfg_);
+        sync::resetTimeModel();
+        Serial.println(LOG_CFG "Werkseinstellungen geladen und gespeichert");
+        requireRestart();
+        return;
+    }
+    Serial.println("Abgebrochen – Werte unverändert");
+    showMenu();
+}
+
+static void handleRestart(const char* in) {
+    if (strcmp(in, "J") == 0 || strcmp(in, "j") == 0) {
+        cmdReboot();
+    }
+    Serial.println("Kein Neustart – Normalbetrieb bis zum Neustart gesperrt (Menüpunkt 11)");
+    showMenu();
+}
+
+static void handleLine(const char* in) {
+    // Führende Leerzeichen ignorieren
+    while (*in == ' ') in++;
+
+    switch (state) {
+        case State::Idle:
+            if (*in == '\0') showMenu();
+            else handleMenu(in);
+            break;
+        case State::Menu:          handleMenu(in);     break;
+        case State::AwaitFox:      handleFox(in);      break;
+        case State::AwaitProfile:  handleProfile(in);  break;
+        case State::AwaitCallsign: handleCallsign(in); break;
+        case State::AwaitFactory:  handleFactory(in);  break;
+        case State::AwaitRestart:  handleRestart(in);  break;
     }
 }
 
-bool process() {
-    if (!cli_active) return false;
+void process() {
+    if (!cli_active) return;
+    uint64_t now = esp_timer_get_time();
 
-    // Zeichen einlesen (non-blocking)
+    // Rückfrage ohne Antwort: abbrechen, Werte bleiben unverändert
+    bool in_prompt = (state != State::Idle && state != State::Menu);
+    if (in_prompt && now - prompt_start_us > (uint64_t)CLI_PROMPT_TIMEOUT_MS * 1000ULL) {
+        Serial.println();
+        if (state == State::AwaitRestart) {
+            Serial.println("Zeitüberschreitung – kein Neustart, Normalbetrieb bis zum Neustart gesperrt");
+        } else {
+            Serial.println("Zeitüberschreitung – abgebrochen, Wert unverändert");
+        }
+        line_len = 0;
+        showMenu();
+    }
+
     while (Serial.available()) {
-        char c = Serial.read();
+        char c = (char)Serial.read();
         last_activity_us = esp_timer_get_time();
 
-        // CR/LF → Befehl verarbeiten
+        // CR, LF oder CRLF beenden die Zeile (LF direkt nach CR ignorieren)
+        if (c == '\n' && last_was_cr) {
+            last_was_cr = false;
+            continue;
+        }
+        last_was_cr = (c == '\r');
         if (c == '\r' || c == '\n') {
-            // Weitere CR/LF überspringen
-            delay(5);
-            while (Serial.available()) {
-                char x = Serial.peek();
-                if (x == '\r' || x == '\n') Serial.read();
-                else break;
-            }
-
-            input_buffer[input_pos] = '\0';
             Serial.println();
-
-            if (!menu_shown && input_pos == 0) {
-                // Erster Enter-Druck → Menü anzeigen
-                showMenu();
-            } else {
-                processCommand(input_buffer);
-            }
-
-            input_pos = 0;
-            return !cli_active;
+            line[line_len] = '\0';
+            line_len = 0;
+            handleLine(line);
+            if (!cli_active) return;
+            continue;
         }
 
-        // Backspace
+        // Backspace / Entf
         if (c == 0x08 || c == 0x7F) {
-            if (input_pos > 0) {
-                input_pos--;
+            if (line_len > 0) {
+                line_len--;
                 Serial.print("\b \b");
             }
             continue;
         }
 
-        // Zeichen puffern
-        if (input_pos < sizeof(input_buffer) - 1) {
-            input_buffer[input_pos++] = c;
+        // Nur druckbare ASCII-Zeichen übernehmen
+        if (c < 0x20 || c > 0x7E) continue;
+        if (line_len < sizeof(line) - 1) {
+            line[line_len++] = c;
             Serial.print(c);
         }
     }
-
-    return false;
 }
 
 bool isActive() {
@@ -660,18 +632,23 @@ bool isActive() {
 
 bool isTimedOut() {
     // Nur Profil D – in den Profilen A–C bestimmt der Slotplan den Start
-    if (!cli_active || sync::isActive()) return false;
+    if (!cli_active || mode != Mode::Startup || sync::isActive()) return false;
+    if (state != State::Idle && state != State::Menu) return false;   // Rückfrage offen
 
     uint64_t elapsed = esp_timer_get_time() - last_activity_us;
     return (elapsed > (uint64_t)CLI_TIMEOUT_PROFILD_MS * 1000ULL);
 }
 
-void resetIdleTimer() {
-    last_activity_us = esp_timer_get_time();
+bool startRequested() {
+    return start_requested;
 }
 
 bool restartRequired() {
     return restart_required;
+}
+
+uint64_t lastActivityUs() {
+    return last_activity_us;
 }
 
 } // namespace cli

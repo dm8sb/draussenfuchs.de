@@ -30,14 +30,6 @@ void toneOff();
 void ledOn();
 void ledOff();
 
-// LED-Blinkmuster für Fehlerzustände
-void blinkSos();         // SOS: ...---... wiederholt, Pause 1,2 s
-void blinkMismatch();    // 3× kurz (150 ms an / 150 ms aus), Pause 1 s
-void blinkInvalid();     // 10 Hz Dauerblinken
-void blinkDutyBlocked(); // 2× kurz, Pause 2 s
-void blinkHeartbeat();   // 2 Hz Herzschlag (Boot/Sync)
-void blinkIdle();        // 0,5 Hz langsam (CLI/Idle)
-
 } // namespace tx
 } // namespace ardf
 

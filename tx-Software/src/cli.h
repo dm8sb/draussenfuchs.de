@@ -3,39 +3,44 @@
 // Copyright (c) 2026 Sebastian , DM8SB
 
 // ============================================================================
-// cli.h – Serielle Kommandozeile (deutschsprachig)
+// cli.h – Serielle Kommandozeile (deutschsprachig, nicht blockierend)
 // ============================================================================
 
 #ifndef ARDF_CLI_H
 #define ARDF_CLI_H
 
 #include <cstdint>
+#include "config.h"
 
 namespace ardf {
 namespace cli {
 
-// CLI initialisieren
-void init();
+enum class Mode : uint8_t {
+    Startup,   // Startphase: Konfiguration, Sync-Status, Start
+    Error      // Fehlerzustand: Konfiguration korrigieren, dann Neustart
+};
 
-// CLI-Verarbeitung (non-blocking, im Loop aufrufen)
-// Gibt true zurück, wenn der Normalbetrieb gestartet werden soll
-bool process();
+// CLI initialisieren; cfg wird bei Änderungen direkt angepasst und gespeichert
+void init(FoxConfig& cfg, Mode mode);
 
-// Menü anzeigen
-void showMenu();
+// Eingaben verarbeiten (non-blocking, regelmäßig aufrufen)
+void process();
 
 // Ist die CLI aktiv?
 bool isActive();
 
-// CLI-Timeout (Auto-Start) prüfen
+// Profil D: Auto-Start nach Inaktivität fällig?
 bool isTimedOut();
 
-// Inaktivitäts-Timer zurücksetzen
-void resetIdleTimer();
+// Profil D: Normalbetrieb per Menüpunkt 10 angefordert?
+bool startRequested();
 
 // Wurde die Konfiguration geändert? Dann muss vor dem Senden neu gestartet werden,
 // weil Sync-Zustand und Startphase noch auf der alten Konfiguration beruhen.
 bool restartRequired();
+
+// Zeitpunkt der letzten Eingabe (esp_timer, µs)
+uint64_t lastActivityUs();
 
 } // namespace cli
 } // namespace ardf

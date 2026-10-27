@@ -88,79 +88,15 @@ void toneOn(uint16_t freq_hz) {
 }
 
 void toneOff() {
+    // Ohne vorherigen toneOn() ist kein LEDC-Kanal eingerichtet
+    if (ledc_attached) {
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
-    ledcWrite(DATA_PIN, 0);
+        ledcWrite(DATA_PIN, 0);
 #else
-    ledcWrite(LEDC_CHANNEL, 0);
+        ledcWrite(LEDC_CHANNEL, 0);
 #endif
+    }
     ledOff();
-}
-
-// ---- LED-Blinkmuster ----
-
-void blinkSos() {
-    // SOS: ...---...
-    uint16_t dit_time = 150;
-    uint16_t dah_time = 450;
-    uint16_t pause = 150;
-
-    // S: ...
-    for (int i = 0; i < 3; i++) {
-        ledOn(); delay(dit_time);
-        ledOff(); delay(pause);
-    }
-    delay(pause * 2); // Zeichenabstand
-
-    // O: ---
-    for (int i = 0; i < 3; i++) {
-        ledOn(); delay(dah_time);
-        ledOff(); delay(pause);
-    }
-    delay(pause * 2);
-
-    // S: ...
-    for (int i = 0; i < 3; i++) {
-        ledOn(); delay(dit_time);
-        ledOff(); delay(pause);
-    }
-
-    delay(1200); // Pause nach SOS
-}
-
-void blinkMismatch() {
-    // 3× kurz (150 ms an / 150 ms aus), Pause 1 s
-    for (int i = 0; i < 3; i++) {
-        ledOn(); delay(150);
-        ledOff(); delay(150);
-    }
-    delay(1000);
-}
-
-void blinkInvalid() {
-    // 10 Hz Dauerblinken (50 ms an / 50 ms aus)
-    ledOn(); delay(50);
-    ledOff(); delay(50);
-}
-
-void blinkDutyBlocked() {
-    // 2× kurz, Pause 2 s
-    for (int i = 0; i < 2; i++) {
-        ledOn(); delay(150);
-        ledOff(); delay(150);
-    }
-    delay(2000);
-}
-
-void blinkHeartbeat() {
-    // 2 Hz Herzschlag (250 ms an / 250 ms aus)
-    ledOn(); delay(250);
-    ledOff(); delay(250);
-}
-
-void blinkIdle() {
-    // 0,5 Hz langsam (500 ms an / 1500 ms aus)
-    ledOn(); delay(500);
-    ledOff(); delay(1500);
 }
 
 } // namespace tx
