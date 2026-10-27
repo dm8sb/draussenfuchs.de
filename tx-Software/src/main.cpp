@@ -32,6 +32,10 @@
 // ---- Konfiguration ----
 static FoxConfig g_config;
 
+// Profil D: Kopie über den Deep-Sleep hinweg (CRC-geprüft), damit nicht bei
+// jedem Aufwachen aus dem NVS gelesen wird
+RTC_DATA_ATTR static FoxConfig rtc_config;
+
 // ---- Fehler-Neuversuche: überleben esp_restart(), nicht aber Power-on/RST ----
 static constexpr uint32_t RETRY_MAGIC = 0xA5D1F0C5;
 RTC_NOINIT_ATTR static uint32_t retry_magic;
@@ -80,7 +84,11 @@ void setup() {
 
     // Aufwachen aus dem Deep-Sleep gibt es nur in Profil D
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-        ardf::config::loadConfig(g_config);
+        if (ardf::config::isValidConfig(rtc_config)) {
+            g_config = rtc_config;
+        } else {
+            ardf::config::loadConfig(g_config);
+        }
         if (ardf::getProfile(g_config.profile_id).is_continuous) {
             runSoloMode();
             return;
@@ -255,7 +263,7 @@ static void runArdfMode() {
     while (true) {
         uint64_t target = model.toLocal(
             ardf::schedule::slotStartUs(start_ref, plan, slot_idx, k));
-        if (esp_timer_get_time() > target + 2000) {
+        if ((uint64_t)esp_timer_get_time() > target + 2000) {
             // Slot verpasst (sollte nicht vorkommen) – nie verspätet senden
             Serial.println(LOG_WARN "Slot verpasst – weiter mit dem nächsten Zyklus");
             k++;
@@ -282,8 +290,7 @@ static void runArdfMode() {
             ardf::tx::power(true);
             delay(TX_WARMUP_MS);
             ardf::morse::sendArdfSlot(
-                g_config.fox_id, g_config.profile_id,
-                g_config.callsign, send_callsign,
+                g_config.fox_id, g_config.callsign, send_callsign,
                 freq_hz, prof.wpm, prof.morse_repeats);
             ardf::tx::toneOff();
             ardf::tx::power(false);
@@ -317,6 +324,8 @@ static void runSoloMode() {
     ardf::tx::power(false);
 
     // Deep-Sleep für die Pausenzeit
+    rtc_config = g_config;
+    ardf::config::updateCrc(rtc_config);
     enterDeepSleep((uint64_t)(plan.cycle_ms - tx_ms) * 1000ULL);
 }
 

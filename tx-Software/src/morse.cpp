@@ -205,7 +205,7 @@ uint32_t calculateMoSequenceDurationMs(uint8_t fox_id, uint8_t wpm, uint8_t repe
     // Mehrere Wiederholungen: Pause zwischen Wiederholungen = 7 dits
     uint32_t total = single_duration;
     for (uint8_t r = 1; r < repeats; r++) {
-        total += 7 * dit_ms; // Wortabstand
+        total += WORD_GAP_DITS * dit_ms; // Wortabstand
         total += single_duration;
     }
 

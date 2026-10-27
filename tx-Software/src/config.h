@@ -14,7 +14,7 @@
 
 // ---- Versions-String (Build-Flag) ----
 #ifndef ARDF_VERSION
-  #define ARDF_VERSION "2.0.0"
+  #define ARDF_VERSION "2.1.0"
 #endif
 
 // ---- Hardware-Pins ----

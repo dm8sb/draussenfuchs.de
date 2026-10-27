@@ -60,7 +60,7 @@ void sendMorseString(const char* text, uint16_t freq_hz, uint8_t wpm) {
     }
 }
 
-void sendArdfSlot(uint8_t fox_id, uint8_t profile_id,
+void sendArdfSlot(uint8_t fox_id,
                   const char* callsign, bool send_callsign,
                   uint16_t freq_hz, uint8_t wpm, uint8_t repeats) {
     if (repeats == 0) return; // Profil D: kein Morse
@@ -72,7 +72,7 @@ void sendArdfSlot(uint8_t fox_id, uint8_t profile_id,
     for (uint8_t r = 0; r < repeats; r++) {
         if (r > 0) {
             // Pause zwischen Wiederholungen: 7 dits
-            delay(7 * dit_ms);
+            delay(WORD_GAP_DITS * dit_ms);
         }
         sendMorseString(mo, freq_hz, wpm);
     }
@@ -80,7 +80,7 @@ void sendArdfSlot(uint8_t fox_id, uint8_t profile_id,
     // Callsign senden (wenn gewünscht)
     if (send_callsign && callsign != nullptr && callsign[0] != '\0') {
         // 7 dits Pause vor dem Callsign
-        delay(7 * dit_ms);
+        delay(WORD_GAP_DITS * dit_ms);
         sendMorseString(callsign, freq_hz, wpm);
     }
 }

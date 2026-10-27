@@ -18,7 +18,6 @@ struct FoxProfile {
     uint8_t  id;              // Profil-ID (0..3)
     char     name;            // Profilbuchstabe (A/B/C/D)
     const char* description;  // Beschreibung
-    uint8_t  fox_count;       // Anzahl Füchse im Zyklus
     uint32_t cycle_ms;        // Gesamtzyklus in ms
     uint32_t slot_ms;         // Slot-Dauer in ms
     uint8_t  wpm;             // Morsegeschwindigkeit
@@ -37,9 +36,6 @@ char getProfileChar(uint8_t profile_id);
 
 // Profil-ID anhand Buchstabe
 uint8_t getProfileIdByChar(char c);
-
-// Profil gültig?
-bool isValidProfileId(uint8_t profile_id);
 
 // Sendezeit-Budget einer Aussendung in ms (zentrale Definition für den Duty-Guard):
 // Zeit, in der das TX-Modul versorgt ist = 20 ms Vorlauf + komplette Sequenz inkl.

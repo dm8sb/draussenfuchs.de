@@ -27,6 +27,9 @@ struct MorseChar {
     bool    valid;          // Zeichen bekannt?
 };
 
+// Wortabstand (zwischen MO-Wiederholungen und vor dem Rufzeichen) in dits
+constexpr uint8_t WORD_GAP_DITS = 7;
+
 // Dit-Dauer in ms berechnen (1200 / WPM)
 uint16_t ditDurationMs(uint8_t wpm);
 
@@ -58,7 +61,7 @@ void sendMorseString(const char* text, uint16_t freq_hz, uint8_t wpm);
 
 // Sende die komplette ARDF-TX-Sequenz für einen Slot
 // Inkl. MO-Kennung(en) und optionalem Callsign
-void sendArdfSlot(uint8_t fox_id, uint8_t profile_id,
+void sendArdfSlot(uint8_t fox_id,
                   const char* callsign, bool send_callsign,
                   uint16_t freq_hz, uint8_t wpm, uint8_t repeats);
 

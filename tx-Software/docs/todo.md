@@ -202,20 +202,23 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   - [cli.cpp:355-358](../src/cli.cpp#L355-L358) / [time_sync.cpp:45](../src/time_sync.cpp#L45) „Letzte Aktualisierung vor x s" zählt nach dem Laden aus dem NVS ab Boot, obwohl die Werte von einem früheren Einsatz stammen.
   **Erledigt:** Mit der Zustandsautomaten-CLI behoben: Fox-Nummer muss genau eine Ziffer 1..5 sein (kein `parseInt`), CR/LF/CRLF werden sauber als ein Zeilenende behandelt (kein doppeltes Menü), Backspace funktioniert in allen Eingaben, nicht druckbare Zeichen werden ignoriert. Werkseinstellungen setzen auch die laufende Zeitmessung zurück. Menüpunkt 7 zeigt die aktuelle Messung gegen den Master und getrennt davon die letzte gespeicherte Messung (ohne irreführendes „vor x s").
 
-- [ ] **P2 – 3.7 Konfiguration wird bei jedem Aufwachen aus dem NVS gelesen**
+- [x] **P2 – 3.7 Konfiguration wird bei jedem Aufwachen aus dem NVS gelesen**
   [main.cpp:88](../src/main.cpp#L88)
   Das kostet Zeit und Strom bei jedem Zyklus. Ist der NVS beschädigt, lädt der Fuchs *mitten im Einsatz* still die Werkseinstellungen (Fox 1, Profil C) und ändert damit seine Identität.
   **Fix:** Die Konfiguration nach dem Kaltstart in den RTC-RAM kopieren (mit CRC) und im Sendebetrieb nur von dort lesen.
+  **Erledigt:** Profil D legt die Konfiguration vor dem Deep-Sleep als CRC-geschützte Kopie im RTC-RAM ab (`rtc_config`) und liest sie nach dem Aufwachen von dort; nur wenn die Kopie ungültig ist, wird aus dem NVS geladen. Die ARDF-Profile schlafen nicht mehr (siehe 1.6).
 
-- [ ] **P3 – 3.8 `ERR_INVALID_CONFIG` ist praktisch unerreichbar**
+- [-] **P3 – 3.8 `ERR_INVALID_CONFIG` ist praktisch unerreichbar**
   `loadConfig()` ersetzt eine ungültige Konfiguration bereits durch die Defaults, deshalb schlägt die Prüfung in [main.cpp:168](../src/main.cpp#L168) nie fehl. Entweder entfernen oder `loadConfig`-Fehler als Warnung (LED) anzeigen.
+  **Nicht umgesetzt:** Bewusst beibehalten als defensive Prüfung vor dem Senden: `loadConfig()` fällt zwar auf Werkseinstellungen zurück, die Prüfung kostet aber nichts und schützt vor künftigen Fehlern im Ladepfad. Ein Hinweis auf geladene Werkseinstellungen erscheint bereits als `[CFG]`-Meldung.
 
 ---
 
 ## 4. Code-Qualität & Architektur
 
-- [ ] **P2 – 4.1 Toter bzw. unbenutzter Code entfernen oder anschließen**
+- [x] **P2 – 4.1 Toter bzw. unbenutzter Code entfernen oder anschließen**
   `rtc_initialized`, `rtc_cycle_start_us`, `rtc_own_slot_idx` (nur geschrieben), `sync::extendSyncWindow()`, `timesync::getCorrectedOffsetUs()`, `cli::resetIdleTimer()`, Rückgabewert von `cli::process()`, `isValidProfileId()`, `blinkHeartbeat/Idle/DutyBlocked`, `FoxProfile::fox_count`, die Parameter `with_callsign/callsign_len` in `calculateTxOnTimeMs` (inkl. unbenutztem `cs_ptr` in [fox_profile.cpp:124](../src/fox_profile.cpp#L124)), der Fall `ERR_DUTY_BLOCKED` in `handleError`.
+  **Erledigt:** Entfernt bzw. ersetzt: RTC-Variablen des alten Timings, `extendSyncWindow()`, `getCorrectedOffsetUs()`, `calculateVorlaufUs()`, `resetIdleTimer()`, Rückgabewert von `cli::process()`, `isValidProfileId()`, `FoxProfile::fox_count`, `calculateTxOnTimeMs()` (samt `cs_ptr`), `ERR_DUTY_BLOCKED`, die `blink*()`-Funktionen, der unbenutzte Parameter `profile_id` von `sendArdfSlot()`. LED-Muster werden jetzt alle verwendet.
 - [x] **P2 – 4.2 Identische if/else-Zweige** in [main.cpp:104-109](../src/main.cpp#L104-L109): beide rufen `initSync(...)` auf.
   **Erledigt:** Mit der neuen Startphase entfallen.
 - [x] **P2 – 4.3 Doppelte Duty-Logik**
@@ -230,16 +233,18 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 - [x] **P2 – 4.6 Heap-Allokation in `computeRegression()`** ([time_sync.cpp:92-119](../src/time_sync.cpp#L92-L119))
   `new[]`, alle 10 s im Sync. Durch statische Puffer ersetzen (`MAX_MEASUREMENTS` ist bekannt). Der Bubble-/Selection-Sort mit O(n²) ist bei n = 120 vertretbar, `std::nth_element` wäre aber eleganter.
   **Erledigt:** `TimeModel` arbeitet mit statischen Puffern, ohne `new[]`.
-- [ ] **P3 – 4.7 Magische Zahlen**
+- [x] **P3 – 4.7 Magische Zahlen**
   Timeouts der Untermenüs (10 s / 30 s), Blink-Zeiten, `delay(500)` USB-Stabilisierung, „7 dits" (mehrfach). Als benannte Konstanten in `config.h` ablegen.
+  **Erledigt:** Benannte Konstanten: `CLI_PROMPT_TIMEOUT_MS`, `USB_CDC_SETTLE_MS`, `MAX_ERROR_RETRIES`, `morse::WORD_GAP_DITS`, Sync-Zeiten (`SYNC_LISTEN_MS`, `PEER_TIMEOUT_MS`, `PLAN_FREEZE_MS`, …), LED-Muster als benannte Tabellen in `led.cpp`.
 - [ ] **P3 – 4.8 `ARDF_VERSION` doppelt definiert** ([platformio.ini:14](../platformio.ini#L14), [config.h:16-18](../src/config.h#L16-L18)), dazu README „Version 2.0.0 – Juli 2026". Version aus `git describe` per `extra_scripts` erzeugen.
+  **Teilweise erledigt:** Version einheitlich 2.1.0 (Protokoll v3 ist inkompatibel zu 2.0.x). Der Fallback in `config.h` bleibt bewusst für Builds ohne Build-Flag. Version aus `git describe` per `extra_scripts` nicht umgesetzt (Build-Erweiterung).
 - [x] **P3 – 4.9 Feste Array-Größe `[5]`** in `SyncBeacon::active_fox_ids` statt `MAX_FOXES`.
   **Erledigt:** Beacon und Slotplan verwenden `MAX_FOXES`.
 - [ ] **P3 – 4.10 Kommentar und Realität beim Arduino-Core**
   [tx_driver.cpp:17-19](../src/tx_driver.cpp#L17-L19) ist korrekt (Core 2.x), die README behauptet „≥ 3.0" (→ 7.1). Die `#if`-Kompatibilitätsschicht ist gut, mit Core 3.x aber ungetestet. Entweder eine Plattformversion festpinnen oder beide Varianten im CI bauen.
 - [ ] **P3 – 4.11 Statische Analyse und Formatierung**
   `build_flags = -Wall -Wextra` aktivieren, `pio check` (cppcheck/clang-tidy) einführen, eine `.clang-format` hinzufügen.
-  **Teilweise erledigt:** `build_src_flags = -Wall -Wextra` für den eigenen Code (Firmware) und `-Wall -Wextra` in den nativen Tests; Stand: keine Warnungen. `pio check`/clang-format nicht eingeführt (Werkzeug-Erweiterung).
+  **Teilweise erledigt:** `build_src_flags = -Wall -Wextra -Wsign-compare -Wformat` (das Framework schaltet sign-compare/format ab; dabei einen echten Vorzeichenvergleich und einen unbenutzten Parameter gefunden und behoben). `-Wunused-parameter` würde in Framework-Headern warnen und wird stattdessen in den nativen Tests (`-Wall -Wextra`) geprüft. Stand: keine Warnungen. `pio check`/clang-format nicht eingeführt (Werkzeug-Erweiterung).
 
 ---
 
@@ -258,10 +263,11 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   - CRC32 gegen bekannte Testvektoren (`"123456789"` → `0xCBF43926`) (3.1)
   - Regression mit synthetischer Drift (+/− ppm, Ausreißer), Vorzeichen (1.10)
   **Erledigt:** Alle genannten Testfälle sind vorhanden, inklusive CRC-Testvektor (`test_crc32_check_value`). Insgesamt 67 native Tests.
-- [ ] **P2 – 5.3 Build-Umgebungen**
+- [x] **P2 – 5.3 Build-Umgebungen**
   - Ein eigenes `[env:esp32c3_supermini]` (README nennt den Super Mini als Hauptziel, gebaut wird nur `lolin_c3_mini`).
   - `platform = espressif32 @ 6.8.x` exakt pinnen (reproduzierbare Builds).
   - `lib_deps =` ist leer, also entfernen.
+  **Erledigt:** Plattform exakt auf `espressif32 @ 6.13.0` gepinnt (Arduino-Core 2.0.17), leeres `lib_deps` entfernt, `default_envs` gesetzt. Eine eigene Super-Mini-Env ist nicht nötig: Die Firmware steuert beide LED-Pins (GPIO7 und GPIO8) parallel und läuft unverändert auf beiden Boards (in der README dokumentiert).
 - [ ] **P2 – 5.4 CI (GitHub Actions)**: `pio run` für alle Envs plus `pio test -e native` bei jedem Push/PR. Das Firmware-Binary als Release-Artefakt anhängen, damit Nutzer ohne PlatformIO flashen können (z. B. mit ESP Web Tools).
 - [ ] **P3 – 5.5 Lokale Umgebung**: Hier schlug der Flash-Image-Schritt fehl (`ModuleNotFoundError: intelhex` im PlatformIO-esptool), die Quellen kompilieren aber. In der README unter „Build" einen Hinweis zur Fehlerbehebung ergänzen (`pio pkg update` bzw. PlatformIO neu installieren).
 

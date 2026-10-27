@@ -19,7 +19,6 @@ static const FoxProfile profiles[] = {
         .id           = PROFILE_A_ID,
         .name         = 'A',
         .description  = "ISM-Standard (60s Zyklus, 18 WPM, 2x MO)",
-        .fox_count    = 5,
         .cycle_ms     = 60000,
         .slot_ms      = 12000,
         .wpm          = 18,
@@ -34,7 +33,6 @@ static const FoxProfile profiles[] = {
         .id           = PROFILE_B_ID,
         .name         = 'B',
         .description  = "ISM-Sprint (30s Zyklus, 20 WPM, 1x MO)",
-        .fox_count    = 5,
         .cycle_ms     = 30000,
         .slot_ms      = 6000,
         .wpm          = 20,
@@ -49,7 +47,6 @@ static const FoxProfile profiles[] = {
         .id           = PROFILE_C_ID,
         .name         = 'C',
         .description  = "ISM-Ultra (20s Zyklus, 24 WPM, 1x MO)",
-        .fox_count    = 5,
         .cycle_ms     = 20000,
         .slot_ms      = 4000,
         .wpm          = 24,
@@ -64,7 +61,6 @@ static const FoxProfile profiles[] = {
         .id           = PROFILE_D_ID,
         .name         = 'D',
         .description  = "draussenfuchs Solo (Dauerton, kein Sync)",
-        .fox_count    = 1,
         .cycle_ms     = 2400,
         .slot_ms      = 2400,
         .wpm          = 0,
@@ -102,10 +98,6 @@ uint8_t getProfileIdByChar(char c) {
     return 0xFF; // Ungültig
 }
 
-bool isValidProfileId(uint8_t profile_id) {
-    return profile_id < PROFILE_COUNT;
-}
-
 uint32_t txBudgetMs(uint8_t profile_id, uint8_t fox_id, const char* callsign) {
     const FoxProfile& prof = getProfile(profile_id);
 
@@ -120,7 +112,7 @@ uint32_t txBudgetMs(uint8_t profile_id, uint8_t fox_id, const char* callsign) {
 
     // Rufzeichen-Slot: 7 dits Pause + Rufzeichen
     if (callsign != nullptr && callsign[0] != '\0') {
-        seq_ms += 7 * morse::ditDurationMs(prof.wpm);
+        seq_ms += morse::WORD_GAP_DITS * morse::ditDurationMs(prof.wpm);
         seq_ms += morse::calculateSequenceDurationMs(callsign, prof.wpm);
     }
 
