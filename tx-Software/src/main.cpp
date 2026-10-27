@@ -53,7 +53,9 @@ enum ErrorState : uint8_t {
     ERR_CONFIG_MISMATCH = 2,
     ERR_INVALID_CONFIG  = 3,
     ERR_NOT_IN_PLAN     = 4,
-    ERR_SYNC_INIT       = 5
+    ERR_SYNC_INIT       = 5,
+    ERR_MISSED_START    = 6,   // Sendebeginn verstrichen, ohne Slotplan
+    ERR_RESTART_PENDING = 7    // Konfiguration geändert, Verbund startet ohne uns
 };
 
 // ---- Vorwärtsdeklarationen ----
@@ -140,6 +142,16 @@ static void runStartupPhase() {
         if (prof.use_espnow) {
             // ARDF: Der Sendebeginn ergibt sich aus dem Slotplan des Masters
             ardf::sync::processSync();
+            const ardf::sync::Network& net = ardf::sync::network();
+            if (net.missedStart()) {
+                handleError(ERR_MISSED_START);
+                return;
+            }
+            // Kollision/Abweichung schon während des Syncs anzeigen, damit sie vor
+            // dem Sendebeginn behoben werden kann
+            ardf::led::set(net.collision() ? ardf::led::Pattern::Sos
+                         : net.mismatch()  ? ardf::led::Pattern::Mismatch
+                                           : ardf::led::Pattern::Sync);
             if (ardf::sync::isSyncComplete()) {
                 if (ardf::cli::isActive()) {
                     Serial.println();
@@ -161,8 +173,15 @@ static void runStartupPhase() {
     }
     ardf::led::set(ardf::led::Pattern::Off);
 
-    // Geänderte Konfiguration nie mit veraltetem Sync-Zustand senden
+    // Geänderte Konfiguration nie mit veraltetem Sync-Zustand senden. Läuft ein
+    // Verbund an, würde ein Neustart jetzt einen unsynchronisierten Allein-Master
+    // ergeben – dann Fehlerzustand statt Neustart.
     if (ardf::cli::restartRequired()) {
+        const ardf::sync::Network& net = ardf::sync::network();
+        if (prof.use_espnow && net.hasPlan() && net.plan().count > 1) {
+            handleError(ERR_RESTART_PENDING);
+            return;
+        }
         Serial.println(LOG_CLI "Konfiguration geändert – Neustart");
         delay(500);
         esp_restart();
@@ -310,7 +329,7 @@ static void runSoloMode() {
     const ardf::FoxProfile& prof = ardf::getProfile(g_config.profile_id);
     uint16_t freq_hz = FOX_TONE_HZ[g_config.fox_id - 1];
 
-    // Pause aus dem ISM-sicheren Zyklus (mindestens tone_off_ms)
+    // Pause = ISM-sicherer Zyklus (mindestens der Profilzyklus) minus Sendezeit
     uint32_t tx_ms = ardf::txBudgetMs(g_config.profile_id, g_config.fox_id, nullptr);
     ardf::schedule::FoxTiming own = {g_config.fox_id, tx_ms, tx_ms};
     ardf::schedule::CyclePlan plan = ardf::schedule::computePlan(g_config.profile_id, &own, 1);
@@ -365,16 +384,21 @@ static void enterDeepSleep(uint64_t sleep_us) {
 // Fehlerbehandlung
 // ============================================================================
 // Kein Senden. LED-Muster zeigt den Fehler, die CLI bleibt bedienbar. Nach
-// ERROR_RECOVERY_MS ohne Eingabe: Neuversuch per Neustart (nur bei Fehlern,
-// die ein anderer Fuchs verursacht haben kann), höchstens MAX_ERROR_RETRIES-mal.
-// Danach Tiefschlaf bis zum Reset, damit der Akku nicht leergezogen wird.
+// ERROR_RECOVERY_MS ohne Eingabe: Neuversuch per Neustart nur bei einem
+// ESP-NOW-Startfehler (beim Booten laufen die anderen Füchse noch im Sync),
+// höchstens MAX_ERROR_RETRIES-mal. Alle anderen Fehler werden erst zum
+// Sendebeginn erkannt – ein Neustart danach hörte keinen Verbund mehr und
+// würde unsynchronisiert allein senden. Danach Tiefschlaf bis zum Reset.
 static void handleError(ErrorState error) {
     const ardf::sync::Network& net = ardf::sync::network();
+    static const char* const RESTART_ALL =
+        LOG_ERR "Nach der Korrektur ALLE Füchse gemeinsam neu starten";
 
     switch (error) {
         case ERR_FOX_COLLISION:
             Serial.println(LOG_ERR "FOX_ID-Kollision – kein Senden möglich!");
-            Serial.println(LOG_ERR "Bitte Fox-Nummer über CLI ändern (Menüpunkt 2)");
+            Serial.println(LOG_ERR "Fox-Nummer über CLI ändern (Menüpunkt 2)");
+            Serial.println(RESTART_ALL);
             break;
         case ERR_CONFIG_MISMATCH: {
             const uint8_t* m = net.mismatchMac();
@@ -383,11 +407,20 @@ static void handleError(ErrorState error) {
                           "MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
                           net.mismatchFoxId(), ardf::getProfileChar(net.mismatchProfileId()),
                           m[0], m[1], m[2], m[3], m[4], m[5]);
+            Serial.println(RESTART_ALL);
             break;
         }
         case ERR_NOT_IN_PLAN:
             Serial.println(LOG_ERR "Fuchs ist nicht im Slotplan – Slotplan war schon fest");
-            Serial.println(LOG_ERR "Zu spät eingeschaltet? Alle Füchse vor dem Sendebeginn einschalten");
+            Serial.println(LOG_ERR "Zu spät eingeschaltet? Alle Füchse gemeinsam neu starten");
+            break;
+        case ERR_MISSED_START:
+            Serial.println(LOG_ERR "Sendebeginn des Verbunds verpasst (Neustart kurz vor dem Start?)");
+            Serial.println(LOG_ERR "Kein Senden – der Verbund läuft bereits. Alle Füchse gemeinsam neu starten");
+            break;
+        case ERR_RESTART_PENDING:
+            Serial.println(LOG_ERR "Konfiguration geändert, aber nicht neu gestartet – der Verbund");
+            Serial.println(LOG_ERR "startet ohne diesen Fuchs. Kein Senden; alle Füchse gemeinsam neu starten");
             break;
         case ERR_SYNC_INIT:
             Serial.println(LOG_ERR "ESP-NOW-Start fehlgeschlagen – kein Senden ohne Synchronisation");
@@ -404,14 +437,14 @@ static void handleError(ErrorState error) {
     switch (error) {
         case ERR_FOX_COLLISION:   ardf::led::set(ardf::led::Pattern::Sos);      break;
         case ERR_CONFIG_MISMATCH:
-        case ERR_NOT_IN_PLAN:     ardf::led::set(ardf::led::Pattern::Mismatch); break;
+        case ERR_NOT_IN_PLAN:
+        case ERR_MISSED_START:
+        case ERR_RESTART_PENDING: ardf::led::set(ardf::led::Pattern::Mismatch); break;
         default:                  ardf::led::set(ardf::led::Pattern::Invalid);  break;
     }
 
-    // Neuversuch nur, wenn ein anderer Fuchs die Ursache sein kann. Ein
-    // Nachzügler würde nach einem Neustart allein (unsynchronisiert) senden.
-    bool retryable = (error == ERR_FOX_COLLISION || error == ERR_CONFIG_MISMATCH ||
-                      error == ERR_SYNC_INIT);
+    bool retryable = (error == ERR_SYNC_INIT);
+    bool restart_was_pending = ardf::cli::restartRequired();
 
     ardf::cli::init(g_config, ardf::cli::Mode::Error);
     uint64_t error_start_us = esp_timer_get_time();
@@ -424,7 +457,8 @@ static void handleError(ErrorState error) {
         delay(10);
     }
 
-    if (ardf::cli::restartRequired()) {
+    if (ardf::cli::restartRequired() && !restart_was_pending) {
+        // Im Fehlerzustand geändert: mit der neuen Konfiguration neu versuchen
         Serial.println(LOG_CLI "Konfiguration geändert – Neustart");
         resetRetries();
         delay(500);

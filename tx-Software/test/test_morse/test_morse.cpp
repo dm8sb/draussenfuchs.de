@@ -34,13 +34,13 @@ void test_dit_duration_0wpm(void) {
     TEST_ASSERT_EQUAL_UINT16(0, ditDurationMs(0));
 }
 
-// Test: Dah = 3 × Dit
+// Test: Dah = 3 × Dit (Ton-AN von „T" = ein Dah, „E" = ein Dit)
 void test_dah_is_3x_dit(void) {
     uint8_t wpm_values[] = {18, 20, 24};
     for (uint8_t i = 0; i < 3; i++) {
         uint16_t dit = ditDurationMs(wpm_values[i]);
-        uint16_t dah = 3 * dit;
-        TEST_ASSERT_EQUAL_UINT16(3 * dit, dah);
+        TEST_ASSERT_EQUAL_UINT32(dit, calculateToneOnTimeMs("E", wpm_values[i]));
+        TEST_ASSERT_EQUAL_UINT32(3 * dit, calculateToneOnTimeMs("T", wpm_values[i]));
     }
 }
 
@@ -160,11 +160,15 @@ void test_sequence_moe_24wpm(void) {
     TEST_ASSERT_EQUAL_UINT32(1250, seq);
 }
 
-// Test: TX-Zeit inkl. 20 ms Vorlauf
+// Test: Wiederholte MO-Kennung = n × Sequenz + (n−1) × 7 dits Wortabstand
+// (Sendezeit-Budget inkl. Vorlauf: siehe test_duty)
 void test_tx_total_with_warmup(void) {
-    uint32_t tone_on = calculateToneOnTimeMs("MOE", 24);
-    uint32_t tx_total = tone_on + 20; // 20 ms Vorlauf
-    TEST_ASSERT_EQUAL_UINT32(820, tx_total);
+    uint32_t single = calculateSequenceDurationMs("MOE", 18);
+    TEST_ASSERT_EQUAL_UINT32(single, calculateMoSequenceDurationMs(1, 18, 1));
+    TEST_ASSERT_EQUAL_UINT32(2 * single + WORD_GAP_DITS * ditDurationMs(18),
+                             calculateMoSequenceDurationMs(1, 18, 2));
+    TEST_ASSERT_EQUAL_UINT32(2 * calculateToneOnTimeMs("MOE", 18),
+                             calculateMoToneOnTimeMs(1, 18, 2));
 }
 
 // Test: Wortabstand (7 dits)

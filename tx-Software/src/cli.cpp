@@ -234,7 +234,7 @@ static void cmdSyncStatus() {
     Serial.println();
     Serial.println("=== Sync-Status ===");
 
-    if (!sync::isActive()) {
+    if (!sync::hasState()) {
         if (getProfile(cfg_->profile_id).use_espnow) {
             Serial.println("ESP-NOW nicht aktiv");
         } else {
@@ -242,6 +242,9 @@ static void cmdSyncStatus() {
         }
         Serial.println();
         return;
+    }
+    if (!sync::isActive()) {
+        Serial.println("(Sync beendet – letzter Stand)");
     }
 
     const sync::Network& net = sync::network();
@@ -309,7 +312,7 @@ static void cmdTimeCorrection() {
     Serial.println();
     Serial.println("=== Zeitkorrekturwerte ===");
 
-    if (sync::isActive()) {
+    if (sync::hasState()) {
         const sync::Network& net = sync::network();
         const timesync::TimeModel& m = net.timeModel();
         if (net.isMaster()) {
@@ -338,10 +341,10 @@ static void cmdTimeCorrection() {
 }
 
 static void cmdClearTimeCorrection() {
-    Serial.println(LOG_WARN "Zeitkorrekturwerte werden gelöscht!");
+    // Nur die gespeicherte Anzeige-Messung; die laufende Messung gegen den Master
+    // gehört zum Slotplan und bleibt unangetastet
     timecorr::clear();
-    sync::resetTimeModel();
-    Serial.println(LOG_CFG "Zeitkorrekturwerte gelöscht, Messung beginnt neu");
+    Serial.println(LOG_CFG "Gespeicherte Zeitkorrekturwerte gelöscht (laufende Messung unverändert)");
 }
 
 static void cmdStartNormal() {
@@ -356,7 +359,7 @@ static void cmdStartNormal() {
 
     const FoxConfig& cfg = *cfg_;
     Serial.println();
-    if (!sync::isActive()) {
+    if (!getProfile(cfg.profile_id).use_espnow) {
         // Profil D: sofort starten
         Serial.println("=== Normalbetrieb wird gestartet ===");
         Serial.printf(LOG_FOX "Fox-ID: %u | Profil: %c | Ton: %u Hz\n",
@@ -399,7 +402,7 @@ static void cmdReboot() {
 static void cmdHelp() {
     Serial.println();
     Serial.println("=== Hilfe ===");
-    Serial.println("Dieses Menü ist nur während der Startphase aktiv.");
+    Serial.println("Dieses Menü ist während der Startphase und im Fehlerzustand aktiv.");
     Serial.println("Profile A–C: Den Sendebeginn legt der Master für alle Füchse fest;");
     Serial.println("             Menüpunkt 10 am Master zieht ihn vor.");
     Serial.println("Profil D:    Nach Inaktivität startet der Normalbetrieb automatisch.");
@@ -457,52 +460,67 @@ static void handleMenu(const char* cmd) {
     if (cli_active) showMenu();
 }
 
+// Geänderte Konfiguration speichern. Gibt true zurück, wenn gespeichert wurde
+// (dann ist ein Neustart nötig); unveränderte Werte und Speicherfehler werden
+// gemeldet, die Konfiguration im RAM bleibt dann wie sie war.
+static bool commitConfig(const FoxConfig& next) {
+    if (next.fox_id == cfg_->fox_id && next.profile_id == cfg_->profile_id &&
+        strncmp(next.callsign, cfg_->callsign, sizeof(next.callsign)) == 0) {
+        Serial.println(LOG_CFG "Wert unverändert – kein Neustart nötig");
+        showMenu();
+        return false;
+    }
+    if (!config::saveConfig(next)) {
+        Serial.println(LOG_ERR "Speichern fehlgeschlagen (NVS) – Wert unverändert");
+        showMenu();
+        return false;
+    }
+    *cfg_ = next;
+    config::updateCrc(*cfg_);
+    return true;
+}
+
 static void handleFox(const char* in) {
-    FoxConfig& cfg = *cfg_;
     // Genau eine Ziffer 1..5 (kein parseInt: „2abc" wird abgelehnt)
-    if (strlen(in) == 1 && in[0] >= '1' && in[0] <= '0' + MAX_FOXES) {
-        cfg.fox_id = (uint8_t)(in[0] - '0');
-        config::saveConfig(cfg);
-        Serial.printf(LOG_CFG "Fox-Nummer auf %u geändert (Ton: %u Hz)\n",
-                      cfg.fox_id, FOX_TONE_HZ[cfg.fox_id - 1]);
-        requireRestart();
+    if (!(strlen(in) == 1 && in[0] >= '1' && in[0] <= '0' + MAX_FOXES)) {
+        Serial.println(LOG_ERR "Ungültige Fox-Nummer (erlaubt: 1..5) – Wert unverändert");
+        showMenu();
         return;
     }
-    Serial.println(LOG_ERR "Ungültige Fox-Nummer (erlaubt: 1..5) – Wert unverändert");
-    showMenu();
+    FoxConfig next = *cfg_;
+    next.fox_id = (uint8_t)(in[0] - '0');
+    if (!commitConfig(next)) return;
+
+    Serial.printf(LOG_CFG "Fox-Nummer auf %u geändert (Ton: %u Hz)\n",
+                  cfg_->fox_id, FOX_TONE_HZ[cfg_->fox_id - 1]);
+    requireRestart();
 }
 
 static void handleProfile(const char* in) {
-    FoxConfig& cfg = *cfg_;
     uint8_t id = (strlen(in) == 1) ? getProfileIdByChar(in[0]) : 0xFF;
     if (id == 0xFF) {
         Serial.println(LOG_ERR "Ungültiges Profil (erlaubt: A, B, C, D) – Wert unverändert");
         showMenu();
         return;
     }
-    cfg.profile_id = id;
-    config::saveConfig(cfg);
+    FoxConfig next = *cfg_;
+    next.profile_id = id;
+    if (!commitConfig(next)) return;
 
     const FoxProfile& prof = getProfile(id);
     Serial.printf(LOG_CFG "Profil auf %c geändert: %s\n", prof.name, prof.description);
     if (id == PROFILE_D_ID) {
         Serial.println(LOG_WARN "Profil D: Solo-Modus ohne ARDF-Synchronisation");
         Serial.println(LOG_WARN "Fox-spezifischer Dauerton, kein ESP-NOW");
+        if (cfg_->callsign[0] != '\0') {
+            Serial.println(LOG_WARN "Das Rufzeichen wird in Profil D nicht gesendet");
+        }
     }
     requireRestart();
 }
 
 static void handleCallsign(const char* in) {
-    FoxConfig& cfg = *cfg_;
     size_t len = strlen(in);
-
-    if (len == 0) {
-        memset(cfg.callsign, 0, sizeof(cfg.callsign));
-        config::saveConfig(cfg);
-        Serial.println(LOG_CFG "Rufzeichen gelöscht – ISM-Modus aktiv");
-        requireRestart();
-        return;
-    }
     if (len > CALLSIGN_MAX_LEN) {
         Serial.printf(LOG_ERR "Rufzeichen zu lang (max. %u Zeichen) – Wert unverändert\n",
                       CALLSIGN_MAX_LEN);
@@ -510,25 +528,31 @@ static void handleCallsign(const char* in) {
         return;
     }
 
-    char buf[CALLSIGN_MAX_LEN + 1];
-    for (size_t i = 0; i <= len; i++) {
+    FoxConfig next = *cfg_;
+    memset(next.callsign, 0, sizeof(next.callsign));
+    for (size_t i = 0; i < len; i++) {
         char ch = in[i];
         if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
-        if (ch != '\0' && !((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
-                            ch == '/' || ch == '-' || ch == '.')) {
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+              ch == '/' || ch == '-' || ch == '.')) {
             Serial.printf(LOG_ERR "Ungültiges Zeichen '%c' – erlaubt: A-Z 0-9 / - . "
                           "– Wert unverändert\n", ch);
             showMenu();
             return;
         }
-        buf[i] = ch;
+        next.callsign[i] = ch;
     }
+    if (!commitConfig(next)) return;
 
-    memset(cfg.callsign, 0, sizeof(cfg.callsign));
-    memcpy(cfg.callsign, buf, len);
-    config::saveConfig(cfg);
-    Serial.printf(LOG_CFG "Rufzeichen gesetzt: %s\n", cfg.callsign);
-    Serial.println(LOG_WARN "Rufzeichen nur für AFU-Betrieb verwenden; im ISM-Betrieb leer lassen.");
+    if (len == 0) {
+        Serial.println(LOG_CFG "Rufzeichen gelöscht – ISM-Modus aktiv");
+    } else {
+        Serial.printf(LOG_CFG "Rufzeichen gesetzt: %s\n", cfg_->callsign);
+        Serial.println(LOG_WARN "Rufzeichen nur für AFU-Betrieb verwenden; im ISM-Betrieb leer lassen.");
+        if (!getProfile(cfg_->profile_id).use_espnow) {
+            Serial.println(LOG_WARN "Das Rufzeichen wird in Profil D nicht gesendet");
+        }
+    }
     requireRestart();
 }
 
@@ -536,9 +560,11 @@ static void handleFactory(const char* in) {
     if (strcmp(in, "J") == 0 || strcmp(in, "j") == 0) {
         config::eraseAllNvs();
         config::resetToDefaults(*cfg_);
-        config::saveConfig(*cfg_);
-        sync::resetTimeModel();
-        Serial.println(LOG_CFG "Werkseinstellungen geladen und gespeichert");
+        if (!config::saveConfig(*cfg_)) {
+            Serial.println(LOG_ERR "Werkseinstellungen konnten nicht gespeichert werden");
+        } else {
+            Serial.println(LOG_CFG "Werkseinstellungen geladen und gespeichert");
+        }
         requireRestart();
         return;
     }

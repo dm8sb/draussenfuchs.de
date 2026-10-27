@@ -57,9 +57,9 @@ Plan (`computePlan()` in `src/schedule.cpp`):
 
 1. `tx_norm` = längstes normales Budget im Verbund, `tx_max` = längste Aussendung
    (Rufzeichen-Slot, sonst = `tx_norm`)
-2. `slot_need = max(profil.slot_ms, tx_max + 250 ms Schutzabstand)`
+2. `slot_need = max(profil.slot_ms, tx_max + 500 ms Schutzabstand)`
 3. `zyklus = max(slot_need × n,  min_zyklus(tx_norm, 9,5 %),  min_zyklus(tx_max, 50 %))`
-   – die Mindestzyklen jeweils mit 100 ppm Reserve für Taktabweichungen
+   – die Mindestzyklen jeweils mit 100 ppm + 10 ms Reserve für Taktabweichungen und Startverzögerung
 4. `slot = zyklus / n`, Reihenfolge nach aufsteigender Fox-ID
 
 | Ergebnis    | Bedeutung                                         |
@@ -90,10 +90,10 @@ Alle Werte aus dem Code berechnet. Ungünstigster Fall: MO5 ist aktiv.
 
 | Füchse | Gewünschter Zyklus | Eff. Zyklus | Slot      | Duty   |
 |-------:|-------------------:|------------:|----------:|-------:|
-|      1 |           4.000 ms |   18.460 ms | 18.460 ms | 9,5 %  |
-|      2 |           8.000 ms |   18.460 ms |  9.230 ms | 9,5 %  |
-|      3 |          12.000 ms |   18.460 ms |  6.153 ms | 9,5 %  |
-|      4 |          16.000 ms |   18.460 ms |  4.615 ms | 9,5 %  |
+|      1 |           4.000 ms |   18.469 ms | 18.469 ms | 9,5 %  |
+|      2 |           8.000 ms |   18.469 ms |  9.234 ms | 9,5 %  |
+|      3 |          12.000 ms |   18.469 ms |  6.156 ms | 9,5 %  |
+|      4 |          16.000 ms |   18.469 ms |  4.617 ms | 9,5 %  |
 |      5 |          20.000 ms |   20.000 ms |  4.000 ms | 8,8 %  |
 
 Profile A und B: siehe README, Abschnitt „Dynamische Zykluszeiten".
@@ -115,8 +115,8 @@ gesendet:
 
 - Sendeablauf: MO-Kennung(en) → 7 dits Pause → Rufzeichen 1×
 - Die Duty-Grenze für diese Aussendung ist **50 %**
-- Der Slot wird so verlängert, dass die Rufzeichen-Aussendung plus 250 ms
-  Schutzabstand hineinpasst (z. B. Profil C, „DL1ABC/P": Slot 7.420 ms, Zyklus 37.100 ms
+- Der Slot wird so verlängert, dass die Rufzeichen-Aussendung plus 500 ms
+  Schutzabstand hineinpasst (z. B. Profil C, „DL1ABC/P": Slot 7.670 ms, Zyklus 38.350 ms
   bei 5 Füchsen)
 - Der Zähler läuft nur im AFU-Modus
 

@@ -40,8 +40,11 @@ Die CLI blockiert nie: Sync, LED und Zeitmessung laufen während jeder Eingabe w
   aber erst nach einem **Neustart** wirksam (Sync und Startphase laufen noch mit der alten
   Konfiguration)
 - Nach jeder Änderung fragt die CLI „Jetzt neu starten? (J/N)"
-- Ohne Neustart ist der Normalbetrieb gesperrt; zum Sendebeginn bzw. nach Ablauf des
-  Timeouts startet der Sender dann neu, statt mit veraltetem Zustand zu senden
+- Die Eingabe des bisherigen Werts gilt nicht als Änderung (kein Neustart nötig)
+- Schlägt das Speichern im NVS fehl, meldet die CLI das und lässt den Wert unverändert
+- Ohne Neustart ist der Normalbetrieb gesperrt. Profil D bzw. ein Fuchs ohne Verbund
+  startet zum Start dann neu; läuft ein Verbund an, geht der Fuchs stattdessen in den
+  Fehlerzustand (ein späterer Neustart würde unsynchronisiert senden)
 
 ### Wichtig
 
@@ -123,6 +126,8 @@ Zeigt alle gespeicherten und abgeleiteten Parameter:
 
 ### 6) Sync-Status anzeigen
 
+Auch im Fehlerzustand verfügbar (letzter Stand der Sync-Phase).
+
 - Eigene MAC-Adresse und Config-Hash
 - Master (Zuhörphase / dieser Fuchs / Fox-Nummer und MAC des Masters)
 - Slotplan: Anzahl Füchse, Zyklus, Slot, Reihenfolge (eigener Slot mit `<<<` markiert)
@@ -138,8 +143,8 @@ Zeigt alle gespeicherten und abgeleiteten Parameter:
 
 ### 8) Zeitkorrekturwerte löschen
 
-- Löscht die gespeicherte Messung aus dem NVS
-- Verwirft die laufende Messung; sie beginnt mit dem nächsten Beacon neu
+- Löscht die gespeicherte Messung aus dem NVS (nur Anzeige)
+- Die laufende Messung gegen den Master bleibt unverändert – sie gehört zum Slotplan
 
 ### 9) Werkseinstellungen laden
 
@@ -155,8 +160,9 @@ Zeigt alle gespeicherten und abgeleiteten Parameter:
 
 - **Profil D:** startet den Sendebetrieb sofort
 - **Profile A–C:** Der Sendebeginn gilt für den ganzen Verbund
-  - am **Master**: zieht den Sendebeginn für alle Füchse auf „in 5 s" vor (sofern der
-    Slotplan noch nicht fest ist)
+  - am **Master**: zieht den Sendebeginn für alle Füchse auf „in 5 s" vor, frühestens
+    aber 30 s nach Beginn der Messung (damit die Slaves ihre Taktabweichung schätzen
+    können); nur solange der Slotplan noch nicht fest ist
   - an einem **Slave**: beendet nur die CLI; der Sendebeginn bleibt beim Master
   - zeigt den Slotplan und die Zeit bis zum Sendebeginn
 - Gesperrt, solange nach einer Änderung kein Neustart erfolgt ist, und im Fehlerzustand
@@ -173,12 +179,16 @@ Zeigt alle gespeicherten und abgeleiteten Parameter:
 
 ## Fehlerzustand
 
-Bei FOX_ID-Kollision, Konfigurations-Abweichung, „nicht im Slotplan" oder ESP-NOW-Fehler
-sendet der Fuchs nicht. Die CLI bleibt erreichbar (Enter):
+Bei FOX_ID-Kollision, Konfigurations-Abweichung, „nicht im Slotplan", verpasstem
+Sendebeginn, ausstehendem Neustart oder ESP-NOW-Fehler sendet der Fuchs nicht. Die CLI
+bleibt erreichbar (Enter):
 
-- Konfiguration prüfen und ändern, dann Neustart (11)
-- Nach 60 s ohne Eingabe: Neuversuch per Neustart (nicht bei „nicht im Slotplan"),
-  höchstens 5-mal; danach Tiefschlaf bis zum Reset
+- Konfiguration prüfen und ändern; danach **alle Füchse gemeinsam neu starten** – die
+  Verbundfehler werden erst zum Sendebeginn festgestellt, ein einzelner Neustart würde
+  unsynchronisiert senden
+- Nur bei einem ESP-NOW-Startfehler: nach 60 s ohne Eingabe automatischer Neuversuch,
+  höchstens 5-mal
+- Sonst nach 60 s ohne Eingabe Tiefschlaf bis zum Reset
 
 ## NVS-Persistenz
 

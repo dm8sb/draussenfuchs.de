@@ -63,9 +63,10 @@ lokal = ref + a + b · (ref − x0)
 
 ### Qualität
 
-- 0–59: zu wenige Punkte für eine Drift-Schätzung
-- 60–100: Anteil der verwendeten Punkte
-- 10/20: Steigung unplausibel bzw. Regression numerisch nicht lösbar
+- 0–59 ohne Drift-Schätzung: zu wenige Punkte (Anteil an den nötigen 30)
+- mit Drift-Schätzung: Anteil der verwendeten Punkte in % (kann bei vielen Ausreißern
+  auch unter 60 liegen)
+- 10/20: Steigung unplausibel bzw. Regression numerisch nicht lösbar (nur Offset)
 
 ## Genauigkeit
 
@@ -77,8 +78,15 @@ Die Verbund-Simulation (`test/test_sync`) mit 5 Füchsen, Quarzen zwischen −30
 | Sendebeginn      | < 1 ms                            |
 | nach 3 Stunden   | ≤ 2 ms (≤ 9 ms nach einem Masterwechsel mit nur 60 s Messdauer) |
 
+Voraussetzung ist eine Messdauer von mindestens etwa 30 s (≥ 30 Messpunkte). Ein Fuchs,
+der kürzer misst, kennt nur den Offset; seine Abweichung wächst dann mit der
+Quarzdifferenz (typ. bis einige 100 ms pro Stunde). Menüpunkt 10 am Master wartet deshalb
+mindestens 30 s Messzeit ab. Temperaturänderungen zwischen Sync-Phase und Einsatz
+(z. B. drinnen konfiguriert, draußen ausgelegt) verändern die Quarzfrequenz und sind
+nicht berücksichtigt.
+
 Der Schutzabstand zwischen dem Ende der längsten Aussendung und dem nächsten Slot beträgt
-mindestens 250 ms.
+mindestens 500 ms (im ISM-Betrieb ist er wegen der Profil-Slots deutlich größer).
 
 ## Laufzeit
 

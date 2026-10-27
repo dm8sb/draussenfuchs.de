@@ -80,7 +80,15 @@ Kompatibel = gleiche `protocol_ver` und gleicher `config_hash`.
 - Bis zu 8 Einträge (auch fremde/inkompatible Geräte)
 - Ein Peer gilt als **inaktiv**, wenn 3 s lang kein Beacon kam; abgelaufene Einträge
   werden wiederverwendet
-- Ändert sich die `boot_id` des Masters, wird dessen Zeitmessung neu begonnen
+- Neustart des Masters (neue `boot_id`):
+  - **vor dem Einfrieren:** Zeitmessung *und* Plan werden verworfen (beide gehören zur
+    alten Master-Uhr) und mit den Beacons der neuen Instanz neu aufgebaut; der
+    Sendebeginn bleibt
+  - **nach dem Einfrieren:** Messung und Plan bleiben, Beacons der neuen Instanz werden
+    ignoriert. Der neu gestartete Fuchs übernimmt den Sendebeginn von den Slaves,
+    berechnet aus denselben Füchsen denselben Plan und reiht sich ins Raster ein
+- Pläne aus Beacons werden nur übernommen, wenn sie plausibel sind (1–5 Füchse,
+  aufsteigende Fox-IDs 1–5, Slot > 0, Slot × Anzahl ≤ Zyklus)
 
 ### Zuhörphase und Sendebeginn
 
@@ -92,11 +100,19 @@ Kompatibel = gleiche `protocol_ver` und gleicher `config_hash`.
 
 ### Master-Wahl
 
-- Master = Fuchs mit der **höchsten MAC-Adresse** unter allen aktiven, kompatiblen Füchsen
-  (einschließlich sich selbst), `memcmp(mac1, mac2, 6) > 0`
-- Ausnahme: Sendet ein kompatibler Fuchs bereits einen eingefrorenen Plan
-  (`FLAG_MASTER | FLAG_PLAN_FROZEN`), ist er Master – der eigene Fuchs ist Nachzügler
-- Fällt der Master vor dem Einfrieren aus, wird neu gewählt; der Sendebeginn bleibt
+1. Sendet ein kompatibler Fuchs einen eingefrorenen Plan (`FLAG_MASTER |
+   FLAG_PLAN_FROZEN`), ist er Master – der eigene Fuchs ist Nachzügler
+2. Ein bestehender Master bleibt Master („klebrig"): Gewählt wird nur unter den Füchsen,
+   die bereits `FLAG_MASTER` senden (bei zwei Mastern bleibt der mit der höheren MAC).
+   Ein später eingeschalteter Fuchs übernimmt also nicht, und die laufende
+   Zeitmessung der Slaves bleibt erhalten.
+3. Gibt es keinen Master: höchste MAC (`memcmp(mac1, mac2, 6) > 0`) unter dem eigenen
+   Fuchs und den Füchsen, die schon mindestens 1,5 s zu hören sind (also selbst fertig
+   zugehört haben). Damit wird in der Regel der zuerst eingeschaltete Fuchs Master; bei
+   gleichzeitigem Einschalten setzt sich die höhere MAC nach Regel 2 durch.
+
+Fällt der Master vor dem Einfrieren aus, wird nach Regel 3 neu gewählt; der
+Sendebeginn bleibt.
 
 ### Slotplan
 
@@ -112,7 +128,15 @@ Kompatibel = gleiche `protocol_ver` und gleicher `config_hash`.
 | Sendebeginn − 1 s       | Sync-Phase endet, WiFi wird abgeschaltet                     |
 | Sendebeginn + Slot × i  | erste Aussendung des Fuchses in Slot i                       |
 
-Menüpunkt 10 am Master setzt den Sendebeginn auf „jetzt + 5 s" (nur vor dem Einfrieren).
+Menüpunkt 10 am Master setzt den Sendebeginn auf „jetzt + 5 s", frühestens aber 30 s
+nach Beginn der Master-Rolle (Messzeit für die Drift der Slaves); nur vor dem Einfrieren.
+
+### Verpasster Sendebeginn
+
+Kennt ein Fuchs den Sendebeginn, hat aber bis dahin keinen Plan (z. B. Neustart kurz vor
+dem Start), wird er nie mehr selbst Master: `missedStart()`, Fehlerzustand, kein Senden.
+Hört ein neu gestarteter Fuchs gar keinen Verbund mehr (Neustart *nach* dem
+Sendebeginn), kann er das nicht erkennen und arbeitet als Allein-Boot.
 
 ## Clock-Abgleich
 
@@ -132,14 +156,19 @@ Regression und Ausgaben laufen in `processSync()` in der Hauptschleife.
 ### FOX_ID-Kollision
 
 - Ein aktiver, kompatibler Sender mit gleicher Fox-Nummer
-- Ergebnis: SOS-Blinkmuster, kein Senden, CLI bleibt erreichbar
-- Behebung: Fox-Nummer über CLI ändern (Menüpunkt 2), Neustart
+- Wird schon während der Sync-Phase per LED (SOS) und Log angezeigt
+- Ergebnis zum Sendebeginn: kein Senden, CLI bleibt erreichbar, kein automatischer
+  Neuversuch
+- Behebung: Fox-Nummer über CLI ändern (Menüpunkt 2), dann alle Füchse gemeinsam neu
+  starten (oder schon während der Sync-Phase korrigieren und nur diesen Fuchs neu
+  starten)
 
 ### Konfigurations-Abweichung
 
 - Ein aktiver Sender mit gleicher Protokollversion, aber anderem Config-Hash
+- Wird schon während der Sync-Phase per LED (3× kurz) und Log angezeigt
 - Ergebnis: 3× Blinken, kein Senden (zwei unabhängige Raster auf derselben Frequenz würden
-  kollidieren)
+  kollidieren), kein automatischer Neuversuch
 - Kein automatisches Überschreiben der lokalen Konfiguration
 - Behebung: Profile und Einstellungen aller Sender abgleichen
 
@@ -147,7 +176,7 @@ Regression und Ausgaben laufen in `processSync()` in der Hauptschleife.
 
 - Der Fuchs wurde erst nach dem Einfrieren eingeschaltet
 - Ergebnis: 3× Blinken, kein Senden, kein automatischer Neuversuch
-- Behebung: alle Füchse neu starten
+- Behebung: alle Füchse gemeinsam neu starten
 
 ## Allein-Boot
 

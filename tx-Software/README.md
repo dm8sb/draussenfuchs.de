@@ -157,19 +157,19 @@ aktiv); ohne MO5 wird der Zyklus etwas kürzer.
 
 | Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Slot      | Duty   |
 |--------------:|-------------------:|------------------:|----------:|-------:|
-|             1 |          12.000 ms |         53.479 ms | 53.479 ms | 9,5 %  |
-|             2 |          24.000 ms |         53.479 ms | 26.739 ms | 9,5 %  |
-|             3 |          36.000 ms |         53.479 ms | 17.826 ms | 9,5 %  |
-|             4 |          48.000 ms |         53.479 ms | 13.369 ms | 9,5 %  |
+|             1 |          12.000 ms |         53.488 ms | 53.488 ms | 9,5 %  |
+|             2 |          24.000 ms |         53.488 ms | 26.744 ms | 9,5 %  |
+|             3 |          36.000 ms |         53.488 ms | 17.829 ms | 9,5 %  |
+|             4 |          48.000 ms |         53.488 ms | 13.372 ms | 9,5 %  |
 |             5 |          60.000 ms |         60.000 ms | 12.000 ms | 8,5 %  |
 
 ### Profil B (20 WPM, 1× MO)
 
 | Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Slot      | Duty   |
 |--------------:|-------------------:|------------------:|----------:|-------:|
-|             1 |           6.000 ms |         22.109 ms | 22.109 ms | 9,5 %  |
-|             2 |          12.000 ms |         22.109 ms | 11.054 ms | 9,5 %  |
-|             3 |          18.000 ms |         22.109 ms |  7.369 ms | 9,5 %  |
+|             1 |           6.000 ms |         22.118 ms | 22.118 ms | 9,5 %  |
+|             2 |          12.000 ms |         22.118 ms | 11.059 ms | 9,5 %  |
+|             3 |          18.000 ms |         22.118 ms |  7.372 ms | 9,5 %  |
 |             4 |          24.000 ms |         24.000 ms |  6.000 ms | 8,8 %  |
 |             5 |          30.000 ms |         30.000 ms |  6.000 ms | 7,0 %  |
 
@@ -177,26 +177,26 @@ aktiv); ohne MO5 wird der Zyklus etwas kürzer.
 
 | Aktive Füchse | Gewünschter Zyklus | Effektiver Zyklus | Slot      | Duty   |
 |--------------:|-------------------:|------------------:|----------:|-------:|
-|             1 |           4.000 ms |         18.460 ms | 18.460 ms | 9,5 %  |
-|             2 |           8.000 ms |         18.460 ms |  9.230 ms | 9,5 %  |
-|             3 |          12.000 ms |         18.460 ms |  6.153 ms | 9,5 %  |
-|             4 |          16.000 ms |         18.460 ms |  4.615 ms | 9,5 %  |
+|             1 |           4.000 ms |         18.469 ms | 18.469 ms | 9,5 %  |
+|             2 |           8.000 ms |         18.469 ms |  9.234 ms | 9,5 %  |
+|             3 |          12.000 ms |         18.469 ms |  6.156 ms | 9,5 %  |
+|             4 |          16.000 ms |         18.469 ms |  4.617 ms | 9,5 %  |
 |             5 |          20.000 ms |         20.000 ms |  4.000 ms | 8,8 %  |
 
-*Werte aus dem Code berechnet (inkl. einer Reserve von 100 ppm für Taktabweichungen).
+*Werte aus dem Code berechnet (inkl. einer Reserve von 100 ppm + 10 ms für Taktabweichungen).
 Menüpunkt 5 der CLI zeigt die Werte für die eigene Konfiguration.*
 
 ### AFU-Modus
 
-Der Slot ist mindestens so lang wie die längste Aussendung im Verbund plus 250 ms
+Der Slot ist mindestens so lang wie die längste Aussendung im Verbund plus 500 ms
 Schutzabstand. Mit Rufzeichen wird der Zyklus deshalb länger, z. B. bei 5 Füchsen und
 dem Rufzeichen „DL1ABC/P":
 
 | Profil | Längste Aussendung | Slot     | Zyklus    |
 |:-------|-------------------:|---------:|----------:|
-| A      |          12.098 ms | 12.348 ms | 61.740 ms |
-| B      |           8.600 ms |  8.850 ms | 44.250 ms |
-| C      |           7.170 ms |  7.420 ms | 37.100 ms |
+| A      |          12.098 ms | 12.598 ms | 62.990 ms |
+| B      |           8.600 ms |  9.100 ms | 45.500 ms |
+| C      |           7.170 ms |  7.670 ms | 38.350 ms |
 
 ---
 
@@ -211,12 +211,17 @@ dem Rufzeichen „DL1ABC/P":
 
 2. **Einschalten:**
    - Alle Sender möglichst gemeinsam einschalten – **spätestens 15 s vor dem
-     Sendebeginn**; 10 s vorher wird der Slotplan festgelegt
+     Sendebeginn** (10 s vorher wird der Slotplan festgelegt). Für eine genaue
+     Messung der Taktabweichung sollte jeder Fuchs **mindestens 30 s** vor dem
+     Sendebeginn laufen; sonst wird nur der Offset gemessen.
    - Die Sync-Phase startet automatisch, die LEDs blinken im Herzschlag-Takt (2 Hz)
+   - Eine Kollision oder Konfigurations-Abweichung zeigt die LED schon während der
+     Sync-Phase (SOS bzw. 3× kurz) – dann vor dem Sendebeginn korrigieren
 
 3. **Synchronisation:**
    - Die Sender tauschen ESP-NOW-Beacons aus (2 pro Sekunde)
-   - Master ist der Sender mit der höchsten MAC-Adresse
+   - Master ist der zuerst eingeschaltete Sender (bei gleichzeitigem Einschalten der
+     mit der höchsten MAC-Adresse); er bleibt Master, solange er zu hören ist
    - Der Master legt den Slotplan fest (Zyklus, Slot, Reihenfolge nach Fox-ID) und den
      **Sendebeginn: 120 s nach dem Einschalten des ersten Fuchses**. Später
      eingeschaltete Füchse übernehmen diesen Zeitpunkt.
@@ -230,27 +235,32 @@ dem Rufzeichen „DL1ABC/P":
 
 5. **Start:**
    - Automatisch zum Sendebeginn; Menüpunkt 10 am Master zieht ihn für alle vor
-     (Start dann nach 5 s)
+     (Start nach 5 s, frühestens aber 30 s nach Beginn der Messung)
    - Alle Sender senden im gemeinsamen Zeitraster, jeder in seinem Slot
 
 6. **Verteilung im Gelände:**
    - Nach dem Start die Sender an den gewünschten Positionen aufstellen
    - Keine weitere Konfiguration notwendig, kein Funkkontakt zwischen den Füchsen nötig
    - Die Sender bleiben über die Quarzuhr und die gemessene Taktabweichung synchron
-     (in der Simulation nach 3 h auf wenige Millisekunden genau)
+     (Simulation mit voller Messdauer: nach 3 h wenige Millisekunden; ohne
+     Driftmessung je nach Quarz bis einige 100 ms pro Stunde). Temperaturänderungen
+     zwischen Messung und Einsatz sind nicht berücksichtigt.
 
 ### Allein-Boot (einzelner Sender)
 
 - Wird kein Nachbar erkannt, ist der Fuchs sein eigener Master und sendet autonom
 - Die maximale ISM-sichere Wiederholrate wird automatisch berechnet
 
-### Nachzügler
+### Nachzügler und Neustarts
 
-Ein Fuchs, der erst nach dem Festlegen des Slotplans eingeschaltet wird, ist nicht im
-Plan. Er sendet dann nicht (LED 3× kurz), statt das Raster der anderen zu stören. Nach
-dem Sendebeginn hört er keinen Verbund mehr und würde als Allein-Boot unsynchronisiert
-senden – deshalb **alle Füchse vor dem Sendebeginn einschalten** bzw. bei einem
-nachträglichen Tausch alle Füchse neu starten.
+- Ein Fuchs, der erst nach dem Festlegen des Slotplans eingeschaltet wird, ist nicht im
+  Plan. Er sendet dann nicht (LED 3× kurz), statt das Raster der anderen zu stören.
+- Startet ein Fuchs kurz vor dem Sendebeginn neu, sodass er den Plan nicht mehr
+  bekommt, sendet er ebenfalls nicht.
+- **Wichtig:** Nach dem Sendebeginn sind die Füchse funkstill. Ein Fuchs, der danach
+  eingeschaltet oder neu gestartet wird (auch RST-Taste, Unterspannung), hört keinen
+  Verbund und sendet als Allein-Boot **unsynchronisiert**. Deshalb alle Füchse vor dem
+  Sendebeginn einschalten und bei Problemen **alle Füchse gemeinsam neu starten**.
 
 ---
 
@@ -300,19 +310,23 @@ Vollständige CLI-Dokumentation: [`docs/cli.md`](docs/cli.md)
 | Startphase ohne Sync (D)        | 0,5 Hz (500 ms an / 1500 ms aus)         | Nein      |
 | FOX_ID-Kollision                | SOS (···−−−···) wiederholt, Pause 1,2 s  | Nein      |
 | Konfigurations-Abweichung       | 3× kurz (150 ms), Pause 1 s              | Nein      |
-| Nicht im Slotplan (Nachzügler)  | 3× kurz (150 ms), Pause 1 s              | Nein      |
+| Nicht im Slotplan / Sendebeginn verpasst / Neustart ausstehend | 3× kurz (150 ms), Pause 1 s | Nein |
 | Ungültige Konfiguration / ESP-NOW-Fehler | 10 Hz Dauerblinken              | Nein      |
 | Duty-Guard blockiert            | 2× kurz, Pause 2 s (bis zur nächsten erlaubten Aussendung) | Nein |
 
 ### Fehler-Erholung
 
 - Alle Fehlerzustände werden über Serial mit `[ERR]`-Prefix ausgegeben
-- Im Fehlerzustand bleibt die CLI bedienbar (Enter): Konfiguration prüfen bzw. ändern,
-  dann Neustart (Menüpunkt 11)
-- Nach 60 s ohne Eingabe: automatischer Neuversuch per Neustart bei Kollision,
-  Konfigurations-Abweichung oder ESP-NOW-Fehler, höchstens 5-mal
-- Danach (bzw. sofort bei „nicht im Slotplan") Tiefschlaf ohne Senden bis zum Reset
-  (RST-Taste), damit der Akku nicht leerläuft
+- Im Fehlerzustand bleibt die CLI bedienbar (Enter): Konfiguration prüfen bzw. ändern
+- Kollision, Abweichung, „nicht im Slotplan" und ein verpasster Sendebeginn werden erst
+  zum Sendebeginn festgestellt; die anderen Füchse senden dann bereits. Ein Neustart
+  dieses einen Fuchses würde unsynchronisiert senden – deshalb kein automatischer
+  Neuversuch: **Ursache beheben und alle Füchse gemeinsam neu starten.**
+- ESP-NOW-Startfehler (beim Booten, die anderen sind noch im Sync): nach 60 s ohne
+  Eingabe automatischer Neuversuch, höchstens 5-mal
+- Danach Tiefschlaf ohne Senden bis zum Reset (RST-Taste), damit der Akku nicht leerläuft
+- Wurde die Konfiguration geändert, aber nicht neu gestartet, und läuft ein Verbund an,
+  geht der Fuchs in den Fehlerzustand statt allein neu zu starten
 
 ---
 

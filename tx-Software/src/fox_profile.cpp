@@ -25,8 +25,7 @@ static const FoxProfile profiles[] = {
         .morse_repeats = 2,
         .use_espnow   = true,
         .is_continuous = false,
-        .tone_on_ms   = 0,
-        .tone_off_ms  = 0
+        .tone_on_ms   = 0
     },
     // Profil B – ISM-Sprint – ID 1
     {
@@ -39,8 +38,7 @@ static const FoxProfile profiles[] = {
         .morse_repeats = 1,
         .use_espnow   = true,
         .is_continuous = false,
-        .tone_on_ms   = 0,
-        .tone_off_ms  = 0
+        .tone_on_ms   = 0
     },
     // Profil C – ISM-Ultra (Default) – ID 2
     {
@@ -53,8 +51,7 @@ static const FoxProfile profiles[] = {
         .morse_repeats = 1,
         .use_espnow   = true,
         .is_continuous = false,
-        .tone_on_ms   = 0,
-        .tone_off_ms  = 0
+        .tone_on_ms   = 0
     },
     // Profil D – draussenfuchs Solo ISM – ID 3
     {
@@ -67,8 +64,7 @@ static const FoxProfile profiles[] = {
         .morse_repeats = 0,
         .use_espnow   = false,
         .is_continuous = true,
-        .tone_on_ms   = 200,
-        .tone_off_ms  = 2200
+        .tone_on_ms   = 200
     }
 };
 

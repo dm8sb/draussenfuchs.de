@@ -29,6 +29,7 @@ static const uint64_t NEVER = 0xFFFFFFFFFFFFFFFFULL;
 
 struct SimNode {
     sync::Network net;
+    sync::OwnInfo own;
     uint8_t  mac[6];
     uint8_t  fox_id;
     uint8_t  profile_id;
@@ -89,8 +90,18 @@ static SimNode& addNode(uint8_t mac_last, uint8_t fox_id, double boot_s, double 
     own.tx_norm_ms = txBudgetMs(profile_id, fox_id, nullptr);
     own.tx_max_ms = own.tx_norm_ms;
     own.boot_id = 1000u + mac_last;
+    n.own = own;
     n.net.begin(own, 0);
     return n;
+}
+
+// Neustart eines Fuchses zum Zeitpunkt t: neue Boot-ID, Uhr beginnt bei 0
+static void restartNode(SimNode& n, uint64_t t) {
+    n.boot_us = t;
+    n.next_beacon_us = t + 100000ULL;
+    n.finished = false;
+    n.own.boot_id += 7919u;
+    n.net.begin(n.own, 0);
 }
 
 // Simulation bis alle eingeschalteten Füchse die Sync-Phase beendet haben.
@@ -175,26 +186,29 @@ static double firstSlotTrueS() {
 
 // ---- Tests ----
 
-// 5 Füchse, versetzt eingeschaltet, Quarze ±35 ppm. Der Fuchs mit der höchsten
-// MAC kommt als vierter dazu und übernimmt den bestehenden Startzeitpunkt.
+// 5 Füchse, versetzt eingeschaltet, Quarze ±35 ppm. Der zuerst eingeschaltete
+// Fuchs wird Master und bleibt es, auch wenn Füchse mit höherer MAC dazukommen.
 void test_five_foxes_stay_aligned_3h(void) {
     reset();
     addNode(0x10, 3, 0.0, +20.0);
     addNode(0x20, 1, 1.2, -15.0);
     addNode(0x30, 5, 2.5, +35.0);
-    addNode(0xF0, 2, 4.1, -30.0);   // höchste MAC → Master
+    addNode(0xF0, 2, 4.1, -30.0);
     addNode(0x40, 4, 7.3, +5.0);
     run(200 * SEC);
 
     TEST_ASSERT_EQUAL_UINT8(5, nodes[0].net.plan().count);
     TEST_ASSERT_EQUAL_UINT32(20000, nodes[0].net.plan().cycle_ms);
-    TEST_ASSERT_TRUE(nodes[3].net.isMaster());
+    TEST_ASSERT_TRUE(nodes[0].net.isMaster());
+    for (uint8_t i = 1; i < node_count; i++) {
+        TEST_ASSERT_TRUE(nodes[i].net.timeModel().hasDrift());
+    }
 
-    // Sendebeginn = Sync-Start des ersten Fuchses + 120 s (vererbt)
+    // Sendebeginn = Sync-Start des ersten Fuchses + 120 s
     TEST_ASSERT_FLOAT_WITHIN(0.1f, 120.0f, (float)firstSlotTrueS());
 
     assertAligned(0, 2000.0);       // ±2 ms beim Start
-    assertAligned(540, 50000.0);    // ±50 ms nach 3 Stunden (Schutzabstand 250 ms)
+    assertAligned(540, 10000.0);    // ±10 ms nach 3 Stunden (540 × 20 s)
 }
 
 void test_collision_detected(void) {
@@ -231,38 +245,129 @@ void test_late_joiner_not_in_plan(void) {
     TEST_ASSERT_EQUAL_UINT8(2, nodes[0].net.plan().count);
 }
 
+// Später (15 s vor Start) eingeschalteter Fuchs mit höchster MAC übernimmt nicht
+// den Master; die laufende Driftmessung der anderen bleibt erhalten
+void test_late_high_mac_keeps_master(void) {
+    reset();
+    addNode(0x10, 1, 0.0, +20.0);
+    addNode(0x20, 2, 1.0, -25.0);
+    SimNode& late = addNode(0xF0, 3, 105.0, +10.0);
+    run(200 * SEC);
+    TEST_ASSERT_TRUE(nodes[0].net.isMaster());
+    TEST_ASSERT_FALSE(late.net.isMaster());
+    TEST_ASSERT_EQUAL_UINT8(3, nodes[0].net.plan().count);
+    TEST_ASSERT_TRUE(nodes[1].net.timeModel().hasDrift());
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 120.0f, (float)firstSlotTrueS());
+    assertAligned(0, 2000.0);
+}
+
 // Master fällt vor dem Einfrieren aus: Neuwahl, Startzeit bleibt erhalten
 void test_master_leaves(void) {
     reset();
-    addNode(0x10, 1, 0.0, +10.0);
+    SimNode& master = addNode(0x10, 1, 0.0, +10.0);
     addNode(0x20, 2, 1.0, -10.0);
     addNode(0x30, 3, 2.0, +25.0);
-    SimNode& master = addNode(0xF0, 4, 3.0, -20.0);
+    addNode(0xF0, 4, 3.0, -20.0);
     master.off_us = 60 * SEC;
     run(200 * SEC);
-    TEST_ASSERT_EQUAL_UINT8(3, nodes[0].net.plan().count);
-    TEST_ASSERT_TRUE(nodes[2].net.isMaster());
+    TEST_ASSERT_EQUAL_UINT8(3, nodes[1].net.plan().count);
+    TEST_ASSERT_TRUE(nodes[3].net.isMaster());
     TEST_ASSERT_FLOAT_WITHIN(0.1f, 120.0f, (float)firstSlotTrueS());
     assertAligned(0, 2000.0);
-    assertAligned(540, 50000.0);
+    assertAligned(540, 20000.0);
+}
+
+// Befund H1: Master startet vor dem Einfrieren neu – Messung und Plan werden neu
+// aufgebaut, der Sendebeginn bleibt, alle Füchse liegen im selben Raster
+static void restartFirst(uint64_t t) { restartNode(nodes[0], t); }
+
+void test_master_restart_before_freeze(void) {
+    reset();
+    addNode(0x10, 1, 0.0, +15.0);   // Master
+    addNode(0x20, 2, 1.0, -20.0);
+    addNode(0x30, 3, 2.0, +5.0);
+    run(200 * SEC, 80 * SEC, restartFirst);
+    for (uint8_t i = 0; i < node_count; i++) {
+        TEST_ASSERT_TRUE(nodes[i].finished);
+        TEST_ASSERT_EQUAL_UINT8(3, nodes[i].net.plan().count);
+    }
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 120.0f, (float)firstSlotTrueS());
+    assertAligned(0, 2000.0);
+}
+
+// Befund H1: Master startet nach dem Einfrieren neu – die anderen behalten Plan
+// und Messung (Beacons der neuen Instanz passen nicht dazu und werden ignoriert).
+// Der neu gestartete Fuchs übernimmt den Sendebeginn der Slaves, berechnet aus
+// denselben Füchsen denselben Plan und liegt – gleicher Quarz wie vorher – im
+// selben Raster.
+void test_master_restart_after_freeze(void) {
+    reset();
+    addNode(0x10, 1, 0.0, +15.0);   // Master
+    addNode(0x20, 2, 1.0, -20.0);
+    addNode(0x30, 3, 2.0, +5.0);
+    run(200 * SEC, 114 * SEC, restartFirst);
+    TEST_ASSERT_FALSE(nodes[0].net.missedStart());
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 120.0f, (float)firstSlotTrueS());
+    assertAligned(0, 3000.0);
+    assertAligned(540, 20000.0);
+}
+
+// Neustart so kurz vor dem Start, dass die Zuhörphase nicht mehr reicht: Der Fuchs
+// sendet nicht (Sendebeginn ohne Plan verpasst), statt ein zweites, unsynchroni-
+// siertes Raster aufzumachen. Die anderen bleiben im Raster.
+static void restartFirstLate(uint64_t t) { restartNode(nodes[0], t); }
+
+void test_restart_just_before_start(void) {
+    reset();
+    addNode(0x10, 1, 0.0, +15.0);   // Master
+    addNode(0x20, 2, 1.0, -20.0);
+    addNode(0x30, 3, 2.0, +5.0);
+    // 118,8 s: hört die anderen noch (bis 119 s), Zuhörphase endet erst nach dem Start
+    run(130 * SEC, 118800000ULL, restartFirstLate);
+
+    const SimNode& a = nodes[1];
+    const SimNode& b = nodes[2];
+    TEST_ASSERT_TRUE(a.finished);
+    TEST_ASSERT_TRUE(b.finished);
+    TEST_ASSERT_EQUAL_UINT8(3, a.net.plan().count);
+    double slot_us = a.net.plan().slot_ms * 1000.0;
+    double err = (trueSlotStart(b, 0) - trueSlotStart(a, 0)) - slot_us;   // Slot 2 → 3
+    TEST_ASSERT_TRUE(err < 2000.0 && err > -2000.0);
+
+    const SimNode& restarted = nodes[0];
+    TEST_ASSERT_FALSE(restarted.finished);
+    TEST_ASSERT_TRUE(restarted.net.missedStart());
 }
 
 // Menüpunkt 10 am Master zieht den Sendebeginn für alle vor
 static void pressStartOnMaster(uint64_t t) {
-    SimNode& m = nodes[2];
+    SimNode& m = nodes[0];
     TEST_ASSERT_TRUE(m.net.requestStart(localOf(m, t)));
 }
 
 void test_request_start(void) {
     reset();
-    addNode(0x10, 1, 0.0, 0.0);
+    addNode(0x10, 1, 0.0, 0.0);   // Master
     addNode(0x20, 2, 1.0, 0.0);
-    addNode(0xF0, 3, 2.0, 0.0);   // Master
-    run(200 * SEC, 30 * SEC, pressStartOnMaster);
-    TEST_ASSERT_FLOAT_WITHIN(0.1f, 35.0f, (float)firstSlotTrueS());
+    addNode(0xF0, 3, 2.0, 0.0);
+    run(200 * SEC, 40 * SEC, pressStartOnMaster);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 45.0f, (float)firstSlotTrueS());
     assertAligned(0, 2000.0);
     // Ein Slave kann den Start nicht vorziehen
-    TEST_ASSERT_FALSE(nodes[0].net.requestStart(0));
+    TEST_ASSERT_FALSE(nodes[2].net.requestStart(0));
+}
+
+// Menüpunkt 10 sehr früh: Start erst nach 30 s Messzeit, damit die Slaves ihre
+// Taktabweichung schätzen können
+void test_request_start_waits_for_measurement(void) {
+    reset();
+    addNode(0x10, 1, 0.0, +30.0);   // Master ab 1,5 s
+    addNode(0x20, 2, 1.0, -30.0);
+    run(200 * SEC, 8 * SEC, pressStartOnMaster);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 31.5f, (float)firstSlotTrueS());
+    TEST_ASSERT_TRUE(nodes[1].net.timeModel().hasDrift());
+    assertAligned(0, 2000.0);
+    assertAligned(540, 20000.0);
 }
 
 // Allein-Boot: eigener Master, Start nach dem Sync-Fenster
@@ -275,6 +380,45 @@ void test_solo(void) {
     TEST_ASSERT_FLOAT_WITHIN(0.1f, 120.0f, (float)firstSlotTrueS());
 }
 
+// Unplausible Pläne aus einem Beacon werden nicht übernommen
+void test_invalid_plan_ignored(void) {
+    reset();
+    SimNode& n = addNode(0x10, 1, 0.0, 0.0);
+    const uint8_t master_mac[6] = {0x24, 0x0A, 0xC4, 0x12, 0x34, 0xF0};
+
+    SyncBeacon b;
+    memset(&b, 0, sizeof(b));
+    b.protocol_ver = SYNC_PROTOCOL_VERSION;
+    b.profile_id = PROFILE_C_ID;
+    b.fox_id = 2;
+    b.flags = FLAG_MASTER | FLAG_HAS_START;
+    b.boot_id = 77;
+    b.config_hash = n.own.config_hash;
+    b.tx_norm_ms = 1370;
+    b.tx_max_ms = 1370;
+    b.plan_start_us = 120 * SEC;
+    b.plan_cycle_ms = 0;            // unplausibel
+    b.plan_slot_ms = 9000;
+    b.plan_count = 2;
+    b.plan_fox_ids[0] = 1;
+    b.plan_fox_ids[1] = 2;
+
+    for (uint64_t t = 100000; t < 3 * SEC; t += 500000) {
+        b.uptime_us = t;
+        n.net.onBeacon(master_mac, b, t);
+        n.net.tick(t);
+    }
+    TEST_ASSERT_FALSE(n.net.isMaster());
+    TEST_ASSERT_FALSE(n.net.hasPlan());
+
+    b.plan_cycle_ms = 18469;        // plausibel
+    b.uptime_us = 3 * SEC;
+    n.net.onBeacon(master_mac, b, 3 * SEC);
+    n.net.tick(3 * SEC);
+    TEST_ASSERT_TRUE(n.net.hasPlan());
+    TEST_ASSERT_EQUAL_INT8(0, n.net.ownSlotIndex());
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -285,9 +429,15 @@ int main(int, char**) {
     RUN_TEST(test_collision_detected);
     RUN_TEST(test_mismatch_detected);
     RUN_TEST(test_late_joiner_not_in_plan);
+    RUN_TEST(test_late_high_mac_keeps_master);
     RUN_TEST(test_master_leaves);
+    RUN_TEST(test_master_restart_before_freeze);
+    RUN_TEST(test_master_restart_after_freeze);
+    RUN_TEST(test_restart_just_before_start);
     RUN_TEST(test_request_start);
+    RUN_TEST(test_request_start_waits_for_measurement);
     RUN_TEST(test_solo);
+    RUN_TEST(test_invalid_plan_ignored);
 
     return UNITY_END();
 }

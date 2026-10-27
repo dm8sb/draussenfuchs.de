@@ -14,10 +14,11 @@ namespace schedule {
 
 static uint32_t maxU32(uint32_t a, uint32_t b) { return (a > b) ? a : b; }
 
-// Reserve für Taktabweichungen zwischen Referenz- und lokaler Uhr
-// (DRIFT_PPM_MAX_VALID + 1 ms), damit der Laufzeit-Guard nie knapp blockiert
+// Reserve, damit der Laufzeit-Guard nie knapp blockiert: Taktabweichung zwischen
+// Referenz- und lokaler Uhr (DRIFT_PPM_MAX_VALID) plus 10 ms für einen leicht
+// verspäteten Sendebeginn (main.cpp lässt bis 2 ms Verspätung zu)
 static uint32_t withDriftMargin(uint32_t ms) {
-    return ms + (uint32_t)((uint64_t)ms * DRIFT_PPM_MAX_VALID / 1000000ULL) + 1;
+    return ms + (uint32_t)((uint64_t)ms * DRIFT_PPM_MAX_VALID / 1000000ULL) + 10;
 }
 
 CyclePlan computePlan(uint8_t profile_id, const FoxTiming* foxes, uint8_t n) {

@@ -16,8 +16,8 @@ namespace tx {
 
 // ---- LEDC-Konfiguration ----
 // Kompatibilitätsschicht: Core 2.x (kanalbasiert) und Core 3.x (pin-basiert)
-// Die Plattform espressif32 ^6.8.0 liefert Core 2.x mit ledcSetup/ledcAttachPin.
-// Sollte eine spätere Version Core 3.x liefern, wird ledcAttach/ledcDetach verwendet.
+// Die gepinnte Plattform espressif32 6.13.0 liefert Core 2.0.17 (ledcSetup/ledcAttachPin).
+// Für Core 3.x ist ledcAttach/ledcDetach vorbereitet (ungetestet).
 #include <esp_arduino_version.h>
 
 static constexpr uint8_t LEDC_CHANNEL = 0;

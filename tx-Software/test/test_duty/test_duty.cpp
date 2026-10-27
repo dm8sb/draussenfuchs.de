@@ -104,6 +104,19 @@ void test_guard_afu_slot(void) {
     TEST_ASSERT_TRUE(g.allows(10500000ULL));
 }
 
+// Rufzeichen-Slot → normaler Slot im Abstand eines Zyklus: Der Guard lässt die
+// normale Aussendung zu, wenn der Zyklus die 50-%-Grenze der langen Aussendung erfüllt
+void test_guard_afu_then_normal(void) {
+    duty::Guard g;
+    uint32_t tx_call = txBudgetMs(PROFILE_C_ID, 5, "DL1ABC/P");
+    uint32_t tx_norm = txBudgetMs(PROFILE_C_ID, 5, nullptr);
+    uint32_t cycle = duty::calculateMinCycleMs(tx_call, true);
+    g.record(0, tx_call, true);
+    TEST_ASSERT_TRUE(g.allows((uint64_t)cycle * 1000ULL));
+    g.record((uint64_t)cycle * 1000ULL, tx_norm, false);
+    TEST_ASSERT_FALSE(g.allows((uint64_t)cycle * 2000ULL));   // ISM-Abstand größer
+}
+
 // ---- Hauptfunktion ----
 
 void setUp(void) {}
@@ -124,6 +137,7 @@ int main(int, char**) {
     RUN_TEST(test_guard_blocks_too_early);
     RUN_TEST(test_guard_blocks_profile_d_cycle_with_morse);
     RUN_TEST(test_guard_afu_slot);
+    RUN_TEST(test_guard_afu_then_normal);
 
     return UNITY_END();
 }

@@ -32,8 +32,8 @@ bool isSyncComplete();
 // Menüpunkt 10: Sendebeginn vorziehen (nur Master)
 bool requestStart();
 
-// Zeitmessung verwerfen und neu beginnen
-void resetTimeModel();
+// Gibt es einen Verbundzustand (Sync lief oder läuft)? Auch nach finishSync().
+bool hasState();
 
 // Sync beenden: letzte Messung im NVS ablegen, WiFi abschalten
 void finishSync();

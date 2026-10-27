@@ -25,7 +25,6 @@ struct FoxProfile {
     bool     use_espnow;      // ESP-NOW-Sync aktiv?
     bool     is_continuous;   // Dauerton statt Morse?
     uint16_t tone_on_ms;      // Nur Profil D: Dauerton-Dauer
-    uint16_t tone_off_ms;     // Nur Profil D: Pausendauer
 };
 
 // Profil anhand ID ermitteln

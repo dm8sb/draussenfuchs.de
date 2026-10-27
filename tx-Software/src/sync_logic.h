@@ -8,8 +8,9 @@
 //
 // Ablauf:
 //  1. Nach dem Start SYNC_LISTEN_MS nur zuhören.
-//  2. Master = höchste MAC unter allen aktiven, kompatiblen Füchsen. Ein Fuchs,
-//     dessen Plan bereits eingefroren ist, bleibt Master (Nachzügler übernehmen).
+//  2. Ein bestehender Master bleibt Master (Wahl nur unter Füchsen mit
+//     FLAG_MASTER); gibt es keinen, wird der Fuchs mit der höchsten MAC Master.
+//     Ein Fuchs mit eingefrorenem Plan bleibt immer Master (Nachzügler folgen).
 //  3. Jeder Fuchs übernimmt nach dem Zuhören einen im Verbund bereits bekannten
 //     Sendebeginn (FLAG_HAS_START) oder schlägt Sync-Start + SYNC_WINDOW_MS vor.
 //     Ein später hinzukommender Fuchs verschiebt den Start deshalb nicht.
@@ -39,6 +40,7 @@ struct PeerFox {
     uint8_t  flags;
     uint32_t boot_id;
     uint64_t last_seen_us;     // lokale Empfangszeit
+    uint64_t first_seen_us;    // erster Beacon dieser Instanz (boot_id)
     uint32_t tx_norm_ms;
     uint32_t tx_max_ms;
     bool     compatible;
@@ -80,7 +82,8 @@ public:
     // Peers altern lassen, Master wählen, Plan pflegen, ggf. einfrieren
     void tick(uint64_t now_us);
 
-    // Menüpunkt 10: Master zieht den Sendebeginn auf now + START_LEAD_MS vor.
+    // Menüpunkt 10: Master zieht den Sendebeginn auf now + START_LEAD_MS vor
+    // (frühestens START_MIN_SYNC_MS nach Beginn der Master-Rolle).
     // false, wenn dieser Fuchs nicht Master ist oder der Plan schon fest ist.
     bool requestStart(uint64_t now_us);
 
@@ -90,8 +93,11 @@ public:
     // Sync-Phase beendet (Plan bekannt, Start steht unmittelbar bevor)?
     bool finished(uint64_t now_us) const;
 
+    // Sendebeginn verstrichen, ohne dass ein Plan vorlag (z. B. Neustart kurz vor
+    // dem Start): Dieser Fuchs darf nicht senden, der Verbund läuft bereits.
+    bool missedStart() const                       { return missed_start_; }
+
     uint8_t takeEvents();
-    void resetTimeModel();
 
     // ---- Zustand ----
     const OwnInfo& own() const                     { return own_; }
@@ -115,15 +121,20 @@ public:
     bool peerActive(uint8_t i, uint64_t now_us) const;
 
 private:
-    void updatePlanAsMaster();
+    int8_t electMaster(uint64_t now_us) const;
+    void updatePlanAsMaster(uint64_t now_us);
     void copyPlanFromBeacon(const SyncBeacon& b);
+    void dropMasterTiming();
+    bool timingValid() const;
 
     OwnInfo  own_;
     uint64_t start_us_ = 0;
-    uint64_t now_us_ = 0;
     PeerFox  peers_[MAX_PEERS];
     int8_t   master_ = MASTER_NONE;
+    uint32_t master_boot_id_ = 0;      // Instanz des Masters, zu der Modell und Plan gehören
+    uint64_t master_since_us_ = 0;     // Beginn der aktuellen Master-Beziehung
     bool     frozen_ = false;
+    bool     missed_start_ = false;
 
     schedule::CyclePlan plan_;
     bool     has_plan_ = false;

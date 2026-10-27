@@ -57,7 +57,7 @@ void test_plan_uses_longest_fox(void) {
     TEST_ASSERT_EQUAL_UINT32(a.slot_ms, b.slot_ms);
     // MO5: 1670 ms → ISM-Mindestzyklus 18458 ms (+ Driftreserve)
     TEST_ASSERT_TRUE(a.cycle_ms >= duty::calculateMinCycleMs(1670));
-    TEST_ASSERT_TRUE(a.cycle_ms <= duty::calculateMinCycleMs(1670) + 5);
+    TEST_ASSERT_TRUE(a.cycle_ms <= duty::calculateMinCycleMs(1670) + 15);
     TEST_ASSERT_TRUE(a.extended);
 }
 
@@ -91,6 +91,25 @@ void test_callsign_slot_fits(void) {
         TEST_ASSERT_TRUE(plan.slot_ms >= longest + SLOT_GUARD_MS);
         TEST_ASSERT_TRUE(duty::calculateDutyPercent(plan.tx_max_ms, plan.cycle_ms) <= 50.0f);
         TEST_ASSERT_TRUE(duty::calculateDutyPercent(plan.tx_norm_ms, plan.cycle_ms) <= 9.5f);
+    }
+}
+
+// AFU: alle Fox-Teilmengen mit Rufzeichen – Rufzeichen-Slot passt, Duty-Grenzen
+// (9,5 % normal, 50 % Rufzeichen-Slot) auch mit Taktreserve eingehalten
+void test_all_subsets_afu(void) {
+    for (uint8_t p = PROFILE_A_ID; p <= PROFILE_C_ID; p++) {
+        for (uint8_t mask = 1; mask < 32; mask++) {
+            uint8_t ids[MAX_FOXES];
+            uint8_t n = 0;
+            for (uint8_t f = 0; f < MAX_FOXES; f++) {
+                if (mask & (1 << f)) ids[n++] = f + 1;
+            }
+            CyclePlan plan = planFor(p, ids, n, "DL1ABC/P");
+            uint32_t local_cycle = plan.cycle_ms - plan.cycle_ms / 10000;
+            TEST_ASSERT_TRUE(local_cycle >= duty::calculateMinCycleMs(plan.tx_norm_ms));
+            TEST_ASSERT_TRUE(local_cycle >= duty::calculateMinCycleMs(plan.tx_max_ms, true));
+            TEST_ASSERT_TRUE(plan.slot_ms >= plan.tx_max_ms + SLOT_GUARD_MS);
+        }
     }
 }
 
@@ -134,6 +153,7 @@ int main(int, char**) {
     RUN_TEST(test_plan_uses_longest_fox);
     RUN_TEST(test_all_subsets_ism);
     RUN_TEST(test_callsign_slot_fits);
+    RUN_TEST(test_all_subsets_afu);
     RUN_TEST(test_duplicates_merged);
     RUN_TEST(test_profile_d);
     RUN_TEST(test_slot_index_and_start);

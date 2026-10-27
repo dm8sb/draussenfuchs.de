@@ -28,8 +28,8 @@ struct CyclePlan {
     uint32_t slot_ms;
     uint8_t  count;                 // aktive Füchse
     uint8_t  fox_ids[MAX_FOXES];    // Slotreihenfolge (aufsteigende Fox-ID)
-    uint32_t tx_norm_ms;            // längste normale Aussendung im Verbund
-    uint32_t tx_max_ms;             // längste Aussendung überhaupt
+    uint32_t tx_norm_ms;            // längste normale Aussendung (nur beim Master gefüllt)
+    uint32_t tx_max_ms;             // längste Aussendung (nur beim Master gefüllt)
     bool     extended;              // Zyklus über den Profilwert hinaus verlängert
 };
 

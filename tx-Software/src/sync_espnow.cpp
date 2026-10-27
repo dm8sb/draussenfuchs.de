@@ -38,6 +38,7 @@ static Network net;
 static QueueHandle_t rx_queue = nullptr;
 static uint8_t own_mac[6];
 static bool sync_initialized = false;
+static bool has_state = false;          // Network wurde einmal gestartet
 static uint64_t next_beacon_us = 0;
 
 // Broadcast-MAC für ESP-NOW
@@ -81,11 +82,11 @@ bool initSync(const FoxConfig& cfg) {
     own.tx_norm_ms  = txBudgetMs(cfg.profile_id, cfg.fox_id, nullptr);
     own.tx_max_ms   = afu ? txBudgetMs(cfg.profile_id, cfg.fox_id, cfg.callsign)
                           : own.tx_norm_ms;
-    own.boot_id     = esp_random();
 
     // WiFi im STA-Modus initialisieren
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
+    own.boot_id = esp_random();   // erst jetzt: mit aktivem Funk volle Entropie
     esp_wifi_get_mac(WIFI_IF_STA, own_mac);
     memcpy(own.mac, own_mac, 6);
 
@@ -97,6 +98,7 @@ bool initSync(const FoxConfig& cfg) {
 
     if (esp_now_init() != ESP_OK) {
         Serial.println(LOG_ERR "ESP-NOW-Initialisierung fehlgeschlagen");
+        WiFi.mode(WIFI_OFF);
         return false;
     }
 
@@ -108,6 +110,7 @@ bool initSync(const FoxConfig& cfg) {
     if (esp_now_add_peer(&peer_info) != ESP_OK) {
         Serial.println(LOG_ERR "Broadcast-Peer konnte nicht hinzugefügt werden");
         esp_now_deinit();
+        WiFi.mode(WIFI_OFF);
         return false;
     }
 
@@ -115,6 +118,7 @@ bool initSync(const FoxConfig& cfg) {
     if (rx_queue == nullptr) {
         Serial.println(LOG_ERR "Empfangs-Queue konnte nicht angelegt werden");
         esp_now_deinit();
+        WiFi.mode(WIFI_OFF);
         return false;
     }
     esp_now_register_recv_cb(onReceive);
@@ -123,6 +127,7 @@ bool initSync(const FoxConfig& cfg) {
     net.begin(own, now);
     next_beacon_us = now;
     sync_initialized = true;
+    has_state = true;
 
     Serial.printf(LOG_SYNC "ESP-NOW-Sync gestartet (Kanal %u, Sendebeginn spätestens %lu s nach dem Master-Start)\n",
                   ESPNOW_CHANNEL, (unsigned long)(SYNC_WINDOW_MS / 1000));
@@ -214,8 +219,8 @@ bool requestStart() {
     return net.requestStart(esp_timer_get_time());
 }
 
-void resetTimeModel() {
-    net.resetTimeModel();
+bool hasState() {
+    return has_state;
 }
 
 void finishSync() {
