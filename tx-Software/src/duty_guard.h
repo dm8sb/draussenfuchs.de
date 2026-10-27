@@ -48,12 +48,6 @@ uint32_t calculateEffectiveCycleMs(uint8_t profile_id, uint8_t active_count,
 // Berechne den Duty-Cycle in Prozent
 float calculateDutyPercent(uint32_t tx_on_ms, uint32_t cycle_ms);
 
-// Log-Ausgabe im vorgegebenen Format
-void logDutyStatus(uint8_t profile_id, uint8_t active_count,
-                   uint32_t slot_ms, uint32_t cycle_ms,
-                   uint32_t tx_on_ms, float duty_pct,
-                   const char* decision);
-
 } // namespace duty
 } // namespace ardf
 

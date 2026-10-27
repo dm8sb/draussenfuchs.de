@@ -53,6 +53,18 @@ static void enterDeepSleep(uint64_t sleep_us);
 static void handleError(ErrorState error);
 static uint64_t calculateNextSlotUs(uint32_t cycle_ms);
 
+// ---- Duty-Log im vorgegebenen Format ----
+static void logDutyStatus(uint8_t profile_id, uint8_t active_count,
+                          uint32_t slot_ms, uint32_t cycle_ms,
+                          uint32_t tx_on_ms, float duty_pct,
+                          const char* decision) {
+    Serial.printf(LOG_DUTY "Profil %c | aktiv:%u | Slot:%lu ms | Zyklus:%lu ms | "
+                  "TX:%lu ms | Duty:%.1f %% | Entscheidung:%s\n",
+                  ardf::getProfileChar(profile_id), active_count,
+                  (unsigned long)slot_ms, (unsigned long)cycle_ms,
+                  (unsigned long)tx_on_ms, duty_pct, decision);
+}
+
 void setup() {
     // Hardware initialisieren
     ardf::tx::init();
@@ -197,7 +209,7 @@ static void runStartupPhase() {
     ardf::duty::GuardCheck gc = ardf::duty::checkDuty(
         g_config.profile_id, g_config.fox_id,
         rtc_active_count, tx_on_ms, false);
-    ardf::duty::logDutyStatus(
+    logDutyStatus(
         g_config.profile_id, rtc_active_count,
         gc.effective_slot_ms, gc.effective_cycle_ms,
         tx_on_ms, gc.duty_percent, gc.decision_text);
@@ -258,7 +270,7 @@ static void runNormalMode() {
 
     if (gc.result == ardf::duty::GuardResult::BLOCKIERT) {
         Serial.println(LOG_ERR "Duty-Guard: Sendung blockiert!");
-        ardf::duty::logDutyStatus(
+        logDutyStatus(
             g_config.profile_id, rtc_active_count,
             gc.effective_slot_ms, gc.effective_cycle_ms,
             tx_on_ms, gc.duty_percent, gc.decision_text);

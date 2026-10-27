@@ -10,149 +10,10 @@
 #include <cstdint>
 #include <cstring>
 
-// ---- Morse-Element-Typ ----
-enum MorseElement : uint8_t {
-    DIT = 0,
-    DAH = 1
-};
+// Getestet wird der echte Produktionscode (src/morse.cpp)
+#include "morse.h"
 
-// ---- Morse-Zeichen ----
-struct MorseChar {
-    uint8_t elements[8];
-    uint8_t length;
-    bool    valid;
-};
-
-// ---- Morse-Tabelle (identisch zu morse.cpp) ----
-struct MorseEntry {
-    char    ch;
-    uint8_t elements[8];
-    uint8_t length;
-};
-
-static const MorseEntry morse_table[] = {
-    {'A', {0,1},             2},
-    {'B', {1,0,0,0},         4},
-    {'C', {1,0,1,0},         4},
-    {'D', {1,0,0},           3},
-    {'E', {0},               1},
-    {'F', {0,0,1,0},         4},
-    {'G', {1,1,0},           3},
-    {'H', {0,0,0,0},         4},
-    {'I', {0,0},             2},
-    {'J', {0,1,1,1},         4},
-    {'K', {1,0,1},           3},
-    {'L', {0,1,0,0},         4},
-    {'M', {1,1},             2},
-    {'N', {1,0},             2},
-    {'O', {1,1,1},           3},
-    {'P', {0,1,1,0},         4},
-    {'Q', {1,1,0,1},         4},
-    {'R', {0,1,0},           3},
-    {'S', {0,0,0},           3},
-    {'T', {1},               1},
-    {'U', {0,0,1},           3},
-    {'V', {0,0,0,1},         4},
-    {'W', {0,1,1},           3},
-    {'X', {1,0,0,1},         4},
-    {'Y', {1,0,1,1},         4},
-    {'Z', {1,1,0,0},         4},
-    {'0', {1,1,1,1,1},       5},
-    {'1', {0,1,1,1,1},       5},
-    {'2', {0,0,1,1,1},       5},
-    {'3', {0,0,0,1,1},       5},
-    {'4', {0,0,0,0,1},       5},
-    {'5', {0,0,0,0,0},       5},
-    {'6', {1,0,0,0,0},       5},
-    {'7', {1,1,0,0,0},       5},
-    {'8', {1,1,1,0,0},       5},
-    {'9', {1,1,1,1,0},       5},
-    {'/', {1,0,0,1,0},       5},
-    {'?', {0,0,1,1,0,0},     6},
-    {'.', {0,1,0,1,0,1},     6},
-    {',', {1,1,0,0,1,1},     6},
-    {'=', {1,0,0,0,1},       5},
-    {'-', {1,0,0,0,0,1},     6},
-};
-
-static const uint8_t MORSE_TABLE_SIZE = sizeof(morse_table) / sizeof(morse_table[0]);
-
-// ---- Testbare Funktionen (Reimplementierung für native Tests) ----
-
-static uint16_t ditDurationMs(uint8_t wpm) {
-    if (wpm == 0) return 0;
-    return 1200 / wpm;
-}
-
-static MorseChar encodeMorseChar(char c) {
-    MorseChar result;
-    memset(&result, 0, sizeof(result));
-    result.valid = false;
-
-    if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
-
-    for (uint8_t i = 0; i < MORSE_TABLE_SIZE; i++) {
-        if (morse_table[i].ch == c) {
-            memcpy(result.elements, morse_table[i].elements, morse_table[i].length);
-            result.length = morse_table[i].length;
-            result.valid = true;
-            return result;
-        }
-    }
-    return result;
-}
-
-// Berechne Ton-AN-Zeit für einen String
-static uint32_t calculateToneOnTimeMs(const char* text, uint8_t wpm) {
-    if (wpm == 0 || text == nullptr) return 0;
-    uint16_t dit_ms = ditDurationMs(wpm);
-    uint32_t tone_on = 0;
-
-    for (size_t i = 0; text[i] != '\0'; i++) {
-        if (text[i] == ' ') continue;
-        MorseChar mc = encodeMorseChar(text[i]);
-        if (!mc.valid) continue;
-        for (uint8_t e = 0; e < mc.length; e++) {
-            if (mc.elements[e] == DIT) tone_on += dit_ms;
-            else tone_on += 3 * dit_ms;
-        }
-    }
-    return tone_on;
-}
-
-// Berechne Gesamtdauer einer Morse-Sequenz
-static uint32_t calculateSequenceDurationMs(const char* text, uint8_t wpm) {
-    if (wpm == 0 || text == nullptr) return 0;
-    uint16_t dit_ms = ditDurationMs(wpm);
-    uint32_t total = 0;
-    bool first_char = true;
-
-    for (size_t i = 0; text[i] != '\0'; i++) {
-        char c = text[i];
-        if (c == ' ') {
-            total += 4 * dit_ms;
-            first_char = true;
-            continue;
-        }
-        MorseChar mc = encodeMorseChar(c);
-        if (!mc.valid) continue;
-        if (!first_char) total += 3 * dit_ms;
-        first_char = false;
-        for (uint8_t e = 0; e < mc.length; e++) {
-            if (e > 0) total += dit_ms;
-            if (mc.elements[e] == DIT) total += dit_ms;
-            else total += 3 * dit_ms;
-        }
-    }
-    return total;
-}
-
-// MO-Kennungsstring
-static const char* getMoCallsign(uint8_t fox_id) {
-    static const char* mo[] = {"MOE", "MOI", "MOS", "MOH", "MO5"};
-    if (fox_id >= 1 && fox_id <= 5) return mo[fox_id - 1];
-    return "MOE";
-}
+using namespace ardf::morse;
 
 // ---- Tests ----
 
@@ -384,48 +245,8 @@ void test_null_string(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
-#ifdef ARDUINO
 
-#include <Arduino.h>
-
-void setup() {
-    delay(2000);
-    UNITY_BEGIN();
-
-    RUN_TEST(test_dit_duration_18wpm);
-    RUN_TEST(test_dit_duration_20wpm);
-    RUN_TEST(test_dit_duration_24wpm);
-    RUN_TEST(test_dit_duration_0wpm);
-    RUN_TEST(test_dah_is_3x_dit);
-    RUN_TEST(test_all_letters_valid);
-    RUN_TEST(test_all_digits_valid);
-    RUN_TEST(test_special_chars_valid);
-    RUN_TEST(test_unknown_chars_invalid);
-    RUN_TEST(test_lowercase_conversion);
-    RUN_TEST(test_morse_E);
-    RUN_TEST(test_morse_T);
-    RUN_TEST(test_morse_S);
-    RUN_TEST(test_morse_O);
-    RUN_TEST(test_morse_5);
-    RUN_TEST(test_tx_time_moe_24wpm);
-    RUN_TEST(test_sequence_moe_24wpm);
-    RUN_TEST(test_tx_total_with_warmup);
-    RUN_TEST(test_word_spacing);
-    RUN_TEST(test_char_spacing);
-    RUN_TEST(test_mo_callsigns);
-    RUN_TEST(test_sequence_mo5_24wpm);
-    RUN_TEST(test_moe_shorter_than_mo5);
-    RUN_TEST(test_empty_string);
-    RUN_TEST(test_null_string);
-
-    UNITY_END();
-}
-
-void loop() {}
-
-#else
-
-int main(int argc, char **argv) {
+int main(int, char**) {
     UNITY_BEGIN();
 
     RUN_TEST(test_dit_duration_18wpm);
@@ -456,5 +277,3 @@ int main(int argc, char **argv) {
 
     return UNITY_END();
 }
-
-#endif

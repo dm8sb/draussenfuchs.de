@@ -3,182 +3,111 @@
 // Copyright (c) 2026 Sebastian , DM8SB
 
 // ============================================================================
-// test_duty.cpp – Unit-Tests für den Duty-Guard
+// test_duty.cpp – Unit-Tests für Sendezeit-Budget und Duty-Guard
 // ============================================================================
 
 #include <unity.h>
-#include <cmath>
 #include <cstdint>
 
-// ---- Testbare Konstanten (aus config.h repliziert für native Tests) ----
-static const float DUTY_LIMIT_ISM          = 0.095f;
-static const float DUTY_LIMIT_AFU_CALLSIGN = 0.50f;
-static const float DUTY_SAFETY_FACTOR      = 1.05f;
+// Getestet wird der echte Produktionscode (src/duty_guard.cpp, src/fox_profile.cpp)
+#include "config.h"
+#include "duty_guard.h"
+#include "fox_profile.h"
 
-// ---- Minimale Reimplementierung der Duty-Guard-Logik für Tests ----
+using namespace ardf;
 
-static uint32_t test_calculateMinCycleMs(uint32_t tx_on_ms) {
-    float min_cycle = (float)tx_on_ms * DUTY_SAFETY_FACTOR / DUTY_LIMIT_ISM;
-    return (uint32_t)ceilf(min_cycle);
+// ---- Sendezeit-Budget ----
+
+// MOE bei 24 WPM: Sequenz 25 dits × 50 ms = 1250 ms + 20 ms Vorlauf
+void test_budget_moe_profil_c(void) {
+    TEST_ASSERT_EQUAL_UINT32(1270, txBudgetMs(PROFILE_C_ID, 1, nullptr));
 }
 
-static float test_calculateDutyPercent(uint32_t tx_on_ms, uint32_t cycle_ms) {
-    if (cycle_ms == 0) return 100.0f;
-    float effective_tx = (float)tx_on_ms * DUTY_SAFETY_FACTOR;
-    return (effective_tx / (float)cycle_ms) * 100.0f;
+// MO5 bei 24 WPM: Sequenz 33 dits × 50 ms = 1650 ms + 20 ms Vorlauf
+void test_budget_mo5_profil_c(void) {
+    TEST_ASSERT_EQUAL_UINT32(1670, txBudgetMs(PROFILE_C_ID, 5, nullptr));
 }
 
-// Profilparameter
-struct TestProfile {
-    uint8_t  id;
-    uint32_t cycle_ms;
-    uint32_t slot_ms;
-    uint8_t  wpm;
-    uint8_t  morse_repeats;
-    bool     is_continuous;
-    uint16_t tone_on_ms;
-};
-
-static const TestProfile profiles[] = {
-    {0, 60000, 12000, 18, 2, false, 0},    // A
-    {1, 30000,  6000, 20, 1, false, 0},    // B
-    {2, 20000,  4000, 24, 1, false, 0},    // C
-    {3,  2400,  2400,  0, 0, true, 200},   // D
-};
-
-// ---- Tests ----
-
-// Test: Minimaler Zyklus für Profil A (längster Fox MO5, 18 WPM, 2×)
-void test_min_cycle_profil_a_mo5(void) {
-    // MO5 bei 18 WPM, 2× Wiederholung
-    // dit = 1200/18 ≈ 66,7 ms
-    // Geschätzte TX-Zeit ca. 4880 ms + 20 ms Vorlauf ≈ 4900 ms
-    uint32_t tx_on_ms = 4900;
-    uint32_t min_cycle = test_calculateMinCycleMs(tx_on_ms);
-    // min_cycle = ceil(4900 * 1.05 / 0.095) = ceil(54158) = 54158
-    float duty = test_calculateDutyPercent(tx_on_ms, min_cycle);
-    TEST_ASSERT_TRUE(duty <= 9.5f);
-    TEST_ASSERT_TRUE(min_cycle > 0);
+// Profil A: 2× MO5 bei 18 WPM (dit 66 ms) + 7 dits Pause zwischen den Wiederholungen
+void test_budget_mo5_profil_a(void) {
+    // 2 × 33 dits + 7 dits = 73 dits × 66 ms = 4818 ms + 20 ms
+    TEST_ASSERT_EQUAL_UINT32(4838, txBudgetMs(PROFILE_A_ID, 5, nullptr));
 }
 
-// Test: Minimaler Zyklus enthält Sicherheitsaufschlag
+// Profil D: Dauerton 200 ms + 20 ms Vorlauf
+void test_budget_profil_d(void) {
+    TEST_ASSERT_EQUAL_UINT32(220, txBudgetMs(PROFILE_D_ID, 1, nullptr));
+}
+
+// Rufzeichen-Slot: MO-Kennung + 7 dits + Rufzeichen
+void test_budget_with_callsign(void) {
+    // "E" = 1 dit → MOE 25 dits + 7 dits + 1 dit = 33 dits × 50 ms + 20 ms
+    TEST_ASSERT_EQUAL_UINT32(1670, txBudgetMs(PROFILE_C_ID, 1, "E"));
+    // Leeres Rufzeichen = normaler Slot
+    TEST_ASSERT_EQUAL_UINT32(1270, txBudgetMs(PROFILE_C_ID, 1, ""));
+}
+
+// ---- Mindestzyklus ----
+
 void test_safety_factor_applied(void) {
-    uint32_t tx_on_ms = 1000;
-    uint32_t min_cycle = test_calculateMinCycleMs(tx_on_ms);
-    // Ohne Sicherheitsaufschlag: 1000 / 0.095 = 10526
-    // Mit Sicherheitsaufschlag: 1000 * 1.05 / 0.095 = 11053
-    TEST_ASSERT_TRUE(min_cycle >= 11053);
+    // 1000 × 1,05 / 0,095 = 11052,6 → 11053
+    TEST_ASSERT_EQUAL_UINT32(11053, duty::calculateMinCycleMs(1000));
 }
 
-// Test: Profil D hat exakt 8,33% Duty
-void test_profil_d_duty(void) {
-    float duty = (float)200 / (float)2400 * 100.0f;
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, 8.33f, duty);
+void test_min_cycle_edge_1ms(void) {
+    uint32_t min_cycle = duty::calculateMinCycleMs(1);
+    TEST_ASSERT_EQUAL_UINT32(12, min_cycle);
+    TEST_ASSERT_TRUE(duty::calculateDutyPercent(1, min_cycle) <= 9.5f);
 }
 
-// Test: Dynamische Zyklusverkürzung hält 9,5% ein (1 Fuchs)
-void test_dynamic_cycle_1_fox(void) {
-    // Profil C, MOE, 24 WPM, 1× → TX ca. 1270 ms + 20 ms = 1290 ms
-    uint32_t tx_on_ms = 1290;
-    uint32_t min_cycle = test_calculateMinCycleMs(tx_on_ms);
-    uint32_t desired_cycle = 4000 * 1; // 1 Fuchs × 4000 ms Slot
-    uint32_t effective = (desired_cycle > min_cycle) ? desired_cycle : min_cycle;
-    float duty = test_calculateDutyPercent(tx_on_ms, effective);
-    TEST_ASSERT_TRUE(duty <= 9.5f);
-}
+// ---- Duty-Guard ----
 
-// Test: Dynamische Zyklusverkürzung hält 9,5% ein (5 Füchse)
-void test_dynamic_cycle_5_foxes(void) {
-    // Profil C, MO5, 24 WPM, 1× → TX ca. 1670 ms + 20 ms = 1690 ms
-    uint32_t tx_on_ms = 1690;
-    uint32_t min_cycle = test_calculateMinCycleMs(tx_on_ms);
-    uint32_t desired_cycle = 4000 * 5; // 5 Füchse × 4000 ms
-    uint32_t effective = (desired_cycle > min_cycle) ? desired_cycle : min_cycle;
-    float duty = test_calculateDutyPercent(tx_on_ms, effective);
-    TEST_ASSERT_TRUE(duty <= 9.5f);
-}
-
-// Test: AFU-Ausnahme (50%-Grenze im 10. Slot)
-void test_afu_exception_50_percent(void) {
-    // Lange TX-Zeit im Callsign-Slot (z.B. 5000 ms)
-    uint32_t tx_on_ms = 5000;
-    float duty_limit = DUTY_LIMIT_AFU_CALLSIGN; // 0.50 = 50%
-
-    // Minimaler Zyklus bei 50% Limit
-    float min_cycle_f = (float)tx_on_ms * DUTY_SAFETY_FACTOR / duty_limit;
-    uint32_t min_cycle = (uint32_t)ceilf(min_cycle_f);
-    // = ceil(5000 * 1.05 / 0.50) = ceil(10500) = 10500
-    TEST_ASSERT_TRUE(min_cycle <= 10500);
-
-    float duty = (float)tx_on_ms * DUTY_SAFETY_FACTOR / (float)min_cycle * 100.0f;
-    TEST_ASSERT_TRUE(duty <= 50.0f);
-}
-
-// Test: ISM-Grenze blockiert bei zu hoher TX-Zeit
-void test_ism_blocking(void) {
-    // TX-Zeit so hoch, dass 9,5% in keinem sinnvollen Zyklus eingehalten werden
-    uint32_t tx_on_ms = 1000;
-    uint32_t cycle_ms = 5000; // Zu kurzer Zyklus
-    float duty = test_calculateDutyPercent(tx_on_ms, cycle_ms);
-    // duty = 1000 * 1.05 / 5000 * 100 = 21.0%
-    TEST_ASSERT_TRUE(duty > 9.5f);
-}
-
-// Test: Edge Case – minimale TX-Zeit
-void test_min_tx_time(void) {
-    uint32_t tx_on_ms = 1;
-    uint32_t min_cycle = test_calculateMinCycleMs(tx_on_ms);
-    TEST_ASSERT_TRUE(min_cycle >= 12); // ceil(1 * 1.05 / 0.095) = 12
-    float duty = test_calculateDutyPercent(tx_on_ms, min_cycle);
-    TEST_ASSERT_TRUE(duty <= 9.5f);
-}
-
-// Test: Edge Case – maximale TX-Zeit (Profil A, MO5, 2×)
-void test_max_tx_time_profil_a(void) {
-    uint32_t tx_on_ms = 5000; // Überschätzung für Sicherheit
-    uint32_t min_cycle = test_calculateMinCycleMs(tx_on_ms);
-    float duty = test_calculateDutyPercent(tx_on_ms, min_cycle);
-    TEST_ASSERT_TRUE(duty <= 9.5f);
-}
-
-// Test: Alle Profile ISM-konform bei 5 Füchsen
-void test_all_profiles_ism_5_foxes(void) {
-    // Worst-Case TX-Zeiten (geschätzt)
-    uint32_t worst_tx[] = {4900, 2100, 1700, 220}; // A, B, C, D
-
-    for (int p = 0; p < 4; p++) {
-        if (profiles[p].is_continuous) {
-            // Profil D: fester Zyklus
-            float duty = (float)profiles[p].tone_on_ms / (float)profiles[p].cycle_ms * 100.0f;
-            TEST_ASSERT_TRUE(duty < 10.0f);
-        } else {
-            uint32_t desired = profiles[p].slot_ms * 5;
-            uint32_t min_c = test_calculateMinCycleMs(worst_tx[p]);
-            uint32_t effective = (desired > min_c) ? desired : min_c;
-            float duty = test_calculateDutyPercent(worst_tx[p], effective);
-            TEST_ASSERT_TRUE_MESSAGE(duty <= 9.5f,
-                "Duty-Überschreitung bei 5 Füchsen");
+// Alle ARDF-Profile, alle Fox-IDs, 1..5 aktive Füchse: Duty ≤ 9,5 %, nie blockiert
+void test_all_profiles_all_foxes_ism(void) {
+    for (uint8_t p = PROFILE_A_ID; p <= PROFILE_C_ID; p++) {
+        for (uint8_t fox = 1; fox <= MAX_FOXES; fox++) {
+            uint32_t tx = txBudgetMs(p, fox, nullptr);
+            for (uint8_t n = 1; n <= MAX_FOXES; n++) {
+                duty::GuardCheck gc = duty::checkDuty(p, fox, n, tx, false);
+                TEST_ASSERT_TRUE_MESSAGE(gc.duty_percent <= 9.5f, "Duty > 9,5 %");
+                TEST_ASSERT_TRUE(gc.result != duty::GuardResult::BLOCKIERT);
+                TEST_ASSERT_TRUE(gc.effective_cycle_ms >= getProfile(p).slot_ms * n);
+            }
         }
     }
 }
 
-// Test: Alle Profile ISM-konform bei 1 Fuchs
-void test_all_profiles_ism_1_fox(void) {
-    uint32_t worst_tx[] = {4900, 2100, 1700, 220};
-
-    for (int p = 0; p < 4; p++) {
-        if (profiles[p].is_continuous) {
-            float duty = (float)profiles[p].tone_on_ms / (float)profiles[p].cycle_ms * 100.0f;
-            TEST_ASSERT_TRUE(duty < 10.0f);
-        } else {
-            uint32_t desired = profiles[p].slot_ms * 1;
-            uint32_t min_c = test_calculateMinCycleMs(worst_tx[p]);
-            uint32_t effective = (desired > min_c) ? desired : min_c;
-            float duty = test_calculateDutyPercent(worst_tx[p], effective);
-            TEST_ASSERT_TRUE_MESSAGE(duty <= 9.5f,
-                "Duty-Überschreitung bei 1 Fuchs");
-        }
+// 5 Füchse: nominaler Profilzyklus reicht in allen Profilen (kein Verlängern)
+void test_five_foxes_nominal_cycle(void) {
+    for (uint8_t p = PROFILE_A_ID; p <= PROFILE_C_ID; p++) {
+        uint32_t tx = txBudgetMs(p, 5, nullptr);  // MO5 = längste Kennung
+        duty::GuardCheck gc = duty::checkDuty(p, 5, 5, tx, false);
+        TEST_ASSERT_EQUAL_UINT32(getProfile(p).cycle_ms, gc.effective_cycle_ms);
+        TEST_ASSERT_TRUE(gc.result == duty::GuardResult::OK);
     }
+}
+
+// 1 Fuchs in Profil C: Zyklus wird auf ISM-sicheren Wert verlängert
+void test_one_fox_extended(void) {
+    uint32_t tx = txBudgetMs(PROFILE_C_ID, 1, nullptr);
+    duty::GuardCheck gc = duty::checkDuty(PROFILE_C_ID, 1, 1, tx, false);
+    TEST_ASSERT_EQUAL_UINT32(14037, gc.effective_cycle_ms);
+    TEST_ASSERT_TRUE(gc.result == duty::GuardResult::VERLAENGERT);
+}
+
+// Profil D: Mindestzyklus nach Budget-Definition (220 ms × 1,05 / 0,095 = 2432 ms)
+void test_profil_d_cycle(void) {
+    uint32_t tx = txBudgetMs(PROFILE_D_ID, 1, nullptr);
+    duty::GuardCheck gc = duty::checkDuty(PROFILE_D_ID, 1, 1, tx, false);
+    TEST_ASSERT_EQUAL_UINT32(2432, gc.effective_cycle_ms);
+    TEST_ASSERT_TRUE(gc.duty_percent <= 9.5f);
+}
+
+// AFU-Rufzeichen-Slot: 50-%-Grenze
+void test_afu_callsign_slot(void) {
+    duty::GuardCheck gc = duty::checkDuty(PROFILE_C_ID, 1, 1, 5000, true);
+    TEST_ASSERT_TRUE(gc.duty_percent <= 50.0f);
+    TEST_ASSERT_TRUE(gc.effective_cycle_ms >= 10500);
 }
 
 // ---- Hauptfunktion ----
@@ -186,49 +115,21 @@ void test_all_profiles_ism_1_fox(void) {
 void setUp(void) {}
 void tearDown(void) {}
 
-#ifdef ARDUINO
-
-#include <Arduino.h>
-
-void setup() {
-    delay(2000);
+int main(int, char**) {
     UNITY_BEGIN();
 
-    RUN_TEST(test_min_cycle_profil_a_mo5);
+    RUN_TEST(test_budget_moe_profil_c);
+    RUN_TEST(test_budget_mo5_profil_c);
+    RUN_TEST(test_budget_mo5_profil_a);
+    RUN_TEST(test_budget_profil_d);
+    RUN_TEST(test_budget_with_callsign);
     RUN_TEST(test_safety_factor_applied);
-    RUN_TEST(test_profil_d_duty);
-    RUN_TEST(test_dynamic_cycle_1_fox);
-    RUN_TEST(test_dynamic_cycle_5_foxes);
-    RUN_TEST(test_afu_exception_50_percent);
-    RUN_TEST(test_ism_blocking);
-    RUN_TEST(test_min_tx_time);
-    RUN_TEST(test_max_tx_time_profil_a);
-    RUN_TEST(test_all_profiles_ism_5_foxes);
-    RUN_TEST(test_all_profiles_ism_1_fox);
-
-    UNITY_END();
-}
-
-void loop() {}
-
-#else
-
-int main(int argc, char **argv) {
-    UNITY_BEGIN();
-
-    RUN_TEST(test_min_cycle_profil_a_mo5);
-    RUN_TEST(test_safety_factor_applied);
-    RUN_TEST(test_profil_d_duty);
-    RUN_TEST(test_dynamic_cycle_1_fox);
-    RUN_TEST(test_dynamic_cycle_5_foxes);
-    RUN_TEST(test_afu_exception_50_percent);
-    RUN_TEST(test_ism_blocking);
-    RUN_TEST(test_min_tx_time);
-    RUN_TEST(test_max_tx_time_profil_a);
-    RUN_TEST(test_all_profiles_ism_5_foxes);
-    RUN_TEST(test_all_profiles_ism_1_fox);
+    RUN_TEST(test_min_cycle_edge_1ms);
+    RUN_TEST(test_all_profiles_all_foxes_ism);
+    RUN_TEST(test_five_foxes_nominal_cycle);
+    RUN_TEST(test_one_fox_extended);
+    RUN_TEST(test_profil_d_cycle);
+    RUN_TEST(test_afu_callsign_slot);
 
     return UNITY_END();
 }
-
-#endif

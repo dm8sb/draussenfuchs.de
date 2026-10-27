@@ -9,7 +9,6 @@
 #include "duty_guard.h"
 #include "config.h"
 #include "fox_profile.h"
-#include <Arduino.h>
 #include <cmath>
 
 namespace ardf {
@@ -113,18 +112,6 @@ GuardCheck checkDuty(uint8_t profile_id, uint8_t fox_id,
     }
 
     return result;
-}
-
-void logDutyStatus(uint8_t profile_id, uint8_t active_count,
-                   uint32_t slot_ms, uint32_t cycle_ms,
-                   uint32_t tx_on_ms, float duty_pct,
-                   const char* decision) {
-    char prof_char = getProfileChar(profile_id);
-    Serial.printf(LOG_DUTY "Profil %c | aktiv:%u | Slot:%lu ms | Zyklus:%lu ms | "
-                  "TX:%lu ms | Duty:%.1f %% | Entscheidung:%s\n",
-                  prof_char, active_count,
-                  (unsigned long)slot_ms, (unsigned long)cycle_ms,
-                  (unsigned long)tx_on_ms, duty_pct, decision);
 }
 
 } // namespace duty

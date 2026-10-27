@@ -203,6 +203,7 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
   `g_config` und `g_start_normal_mode` sind globale Variablen. Besser: Die CLI bekommt eine Referenz auf die Konfiguration und meldet über einen Rückgabewert (`enum class CliResult { None, StartNormal, Reboot }`).
 - [ ] **P2 – 4.5 Hardware-Abstraktion für Tests**
   `morse.cpp` gibt im reinen Rechenpfad über `Serial` aus ([morse.cpp:105](../src/morse.cpp#L105)), und `duty_guard.cpp` bindet `Arduino.h` ein. Rechenlogik (Morse-Timing, Duty, Slotplan, Regression) in Arduino-freie Dateien trennen, damit sie nativ testbar wird (→ 5.1).
+  **Teilweise erledigt:** Schritt 2a: `morse.cpp` (Rechnen) / `morse_tx.cpp` (Senden) getrennt, `config_check.cpp` (CRC, Validierung, Hash) aus `config_store.cpp` herausgelöst, Duty-Log von `duty_guard.cpp` nach `main.cpp` verschoben. Sync- und Zeitlogik folgen mit 8.1.
 - [ ] **P2 – 4.6 Heap-Allokation in `computeRegression()`** ([time_sync.cpp:92-119](../src/time_sync.cpp#L92-L119))
   `new[]`, alle 10 s im Sync. Durch statische Puffer ersetzen (`MAX_MEASUREMENTS` ist bekannt). Der Bubble-/Selection-Sort mit O(n²) ist bei n = 120 vertretbar, `std::nth_element` wäre aber eleganter.
 - [ ] **P3 – 4.7 Magische Zahlen**
@@ -218,10 +219,11 @@ Für einen echten ARDF-Verbund empfehle ich, das Timing neu zu bauen (Vorschlag 
 
 ## 5. Tests, Build, CI
 
-- [ ] **P1 – 5.1 Die Tests testen nicht den Produktionscode**
+- [x] **P1 – 5.1 Die Tests testen nicht den Produktionscode**
   [test/test_duty/test_duty.cpp:13-47](../test/test_duty/test_duty.cpp#L13-L47), [test/test_morse/test_morse.cpp:12-60](../test/test_morse/test_morse.cpp#L12-L60)
   Beide Testdateien enthalten eine *Kopie* der Morse-Tabelle bzw. der Duty-Formeln. Fehler im echten Code (z. B. 1.1, 2.2, 2.3, 3.1) bleiben so unentdeckt.
   **Fix:** Eine `[env:native]` in `platformio.ini` (`platform = native`, `test_build_src = yes`, `build_src_filter` auf die Arduino-freien Module), die Tests gegen die echten Header/Quellen.
+  **Erledigt:** Neue Envs `native` (GCC im PATH) und `native_win` (MinGW über PlatformIO) mit `test_build_src = yes` und einem `build_src_filter` auf die hardwareunabhängigen Module. Beide Testdateien binden jetzt die echten Header/Quellen ein, die Kopien der Tabellen und Formeln sind entfernt. Aufruf: `pio test -e native_win` (Windows) bzw. `pio test -e native`. Die Firmware-Env ignoriert Tests (`test_ignore`).
 - [ ] **P1 – 5.2 Fehlende Tests für die kritischen Pfade**
   - Config-Hash: zwei Füchse mit unterschiedlicher ID, sonst gleich → kompatibel (deckt 1.1 auf)
   - Slotplan/Sendezeitpunkt über viele Zyklen ohne Akkumulation (1.2/1.3)
